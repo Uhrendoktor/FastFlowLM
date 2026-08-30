@@ -38,6 +38,7 @@ typedef enum {
     qwen3_5,
     qwen3_5_omni,
     qwen3_6_moe,
+    qwen3_8,
     gemma3,
     gemma3_text,
     gemma4e,
@@ -52,7 +53,6 @@ typedef enum {
 
 inline std::pair<std::string, std::unique_ptr<AutoModel>> get_auto_model(const std::string& model_tag, model_list& available_models, flm_rt::device* npu_device_inst) {
 
-    
     static const std::map<std::string, SupportedModelFamily> modelFamilyMap = {
         {"llama3", SupportedModelFamily::llama3},
         {"deepseek-r1", SupportedModelFamily::deepseek_r1},
@@ -65,6 +65,7 @@ inline std::pair<std::string, std::unique_ptr<AutoModel>> get_auto_model(const s
         {"qwen3.5", SupportedModelFamily::qwen3_5},
         {"qwen3.5-omni", SupportedModelFamily::qwen3_5_omni},
         {"qwen3.6-moe", SupportedModelFamily::qwen3_6_moe},
+        {"qwen3.8", SupportedModelFamily::qwen3_8},
         {"gemma3", SupportedModelFamily::gemma3},
         {"gemma3-text", SupportedModelFamily::gemma3_text},
         {"gemma4e", SupportedModelFamily::gemma4e},
@@ -78,7 +79,6 @@ inline std::pair<std::string, std::unique_ptr<AutoModel>> get_auto_model(const s
         {"embed-gemma", SupportedModelFamily::error_embedding}
     };
 
-    
     if (available_models.is_model_supported(model_tag) == false) {
         header_print_r("ERROR", "Model tag '" << model_tag << "' is not supported. Please check the model list.");
         return std::make_pair("llama3.2:1b", std::make_unique<Llama3>(npu_device_inst));
@@ -128,6 +128,9 @@ inline std::pair<std::string, std::unique_ptr<AutoModel>> get_auto_model(const s
             auto_chat_engine = std::make_unique<Qwen3VL>(npu_device_inst);
             break;
         case SupportedModelFamily::qwen3_5:
+        case SupportedModelFamily::qwen3_8:
+            // Qwen3.8-27B uses the Qwen3.5 VLM runtime because it is published
+            // as Qwen3_5ForConditionalGeneration with the same hybrid layout.
             auto_chat_engine = std::make_unique<Qwen3_5VL>(npu_device_inst);
             break;
         case SupportedModelFamily::qwen3_5_omni:
@@ -155,6 +158,6 @@ inline std::pair<std::string, std::unique_ptr<AutoModel>> get_auto_model(const s
             auto_chat_engine = std::make_unique<Llama3>(npu_device_inst);
             new_model_tag = "llama3.2:1b";
     }
-  
+
     return std::make_pair(new_model_tag, std::move(auto_chat_engine));
-} 
+}
