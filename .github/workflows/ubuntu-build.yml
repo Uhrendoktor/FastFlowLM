@@ -50,12 +50,8 @@ jobs:
         id: get_version
         run: |
           VERSION=$(git describe --tags --always)
+          # Strip leading 'v' for Debian version compatibility
           DEB_VERSION=$(echo "${VERSION}" | sed 's/^v//')
-          # Debian versions must start with a digit. On untagged commits,
-          # git describe returns a bare SHA, so use a valid development version.
-          if ! echo "${DEB_VERSION}" | grep -q '^[0-9]'; then
-            DEB_VERSION="0.0.0+git.${GITHUB_SHA:0:7}"
-          fi
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "deb_version=${DEB_VERSION}" >> $GITHUB_OUTPUT
 
