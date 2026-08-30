@@ -53,6 +53,7 @@ typedef enum {
 
 inline std::pair<std::string, std::unique_ptr<AutoModel>> get_auto_model(const std::string& model_tag, model_list& available_models, flm_rt::device* npu_device_inst) {
 
+    
     static const std::map<std::string, SupportedModelFamily> modelFamilyMap = {
         {"llama3", SupportedModelFamily::llama3},
         {"deepseek-r1", SupportedModelFamily::deepseek_r1},
@@ -79,6 +80,7 @@ inline std::pair<std::string, std::unique_ptr<AutoModel>> get_auto_model(const s
         {"embed-gemma", SupportedModelFamily::error_embedding}
     };
 
+    
     if (available_models.is_model_supported(model_tag) == false) {
         header_print_r("ERROR", "Model tag '" << model_tag << "' is not supported. Please check the model list.");
         return std::make_pair("llama3.2:1b", std::make_unique<Llama3>(npu_device_inst));
@@ -158,6 +160,6 @@ inline std::pair<std::string, std::unique_ptr<AutoModel>> get_auto_model(const s
             auto_chat_engine = std::make_unique<Llama3>(npu_device_inst);
             new_model_tag = "llama3.2:1b";
     }
-
+  
     return std::make_pair(new_model_tag, std::move(auto_chat_engine));
-}
+} 
