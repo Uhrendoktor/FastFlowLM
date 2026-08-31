@@ -102,6 +102,7 @@ def patch(root: Path) -> None:
     t = t.replace('carrier must be 80 dwords', 'carrier must be 60 dwords')
     t = t.replace('attention return window must be 512 dwords', 'attention return window must be 768 dwords')
     t = t.replace('SHAPE_CARRIER_DWORDS != 80', 'SHAPE_CARRIER_DWORDS != 60')
+    t = t.replace('            WEIGHT_DWORDS * 8,\n        )', '            ATTENTION_OUTPUT_DWORDS,\n        )')
     g.write_text(t)
 
     h = ex / 'qwen3_constants.h'
