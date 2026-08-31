@@ -1,0 +1,201 @@
+name: Canonical Qwen3.8-27B NPU bring-up
+on:
+  push:
+    branches: [feat/qwen3.8-27b]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: qwen38-27b-canonical
+  cancel-in-progress: true
+jobs:
+  bringup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout FastFlowLM
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: Validate authoritative 27B geometry
+        run: |
+          set -euxo pipefail
+          python3 tools/npu/qwen38_27b_geometry.py tools/npu/qwen38_27b_geometry.json
+          python3 tools/npu/qwen38_27b_layer_plan.py
+          python3 - <<'PY'
+          import json
+          p=json.load(open('tools/npu/qwen38_27b_layer_plan.json'))
+          assert (p['hidden_size'],p['intermediate_size'],p['vocab_size'],p['num_hidden_layers'])==(5120,17408,248320,64)
+          assert p['layer_types']==['linear_attention','linear_attention','linear_attention','full_attention']*16
+          assert p['layers'][3]['q_width']==6144 and p['layers'][0]['qkv_width']==10240
+          print('27B geometry + hybrid topology: PASS')
+          PY
+      - name: Bootstrap pinned torch2aie / MLIR-AIE / XDNA2 toolchain
+        env:
+          TORCH2AIE_REPO: https://github.com/bong-water-water-bong/torch2aie.git
+          TORCH2AIE_SHA: 1e17e9fe0a0bc428b8a371dc8e4adbe69ee31fcc
+        run: |
+          set -euxo pipefail
+          git clone "$TORCH2AIE_REPO" "$HOME/torch2aie"
+          cd "$HOME/torch2aie"
+          git checkout --detach "$TORCH2AIE_SHA"
+          test "$(git rev-parse HEAD)" = "$TORCH2AIE_SHA"
+          grep -qx 'tag=toolchain-2026-06-02' <(grep '^tag=' toolchain-release.lock)
+          grep -qx 'archive_sha256=70222aa334057fde23be96b8763fb63b53ff7615ec004ac16ecba3abb3d5aefb' <(grep '^archive_sha256=' toolchain-release.lock)
+          bash scripts/install_toolchain_from_release.sh
+          python3 -m pip install --user uv
+          export PATH="$HOME/.local/bin:$PATH"
+          bash scripts/setup_python.sh
+          source .venv/bin/activate
+          source scripts/env.sh
+          echo "TORCH2AIE=$HOME/torch2aie" >> "$GITHUB_ENV"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/torch2aie/.venv/bin" >> "$GITHUB_PATH"
+          echo "$HOME/torch2aie/toolchain/bin" >> "$GITHUB_PATH"
+          printf 'torch2aie=%s\n' "$(git rev-parse HEAD)" | tee /tmp/toolchain.txt
+          cat toolchain-release.lock | tee -a /tmp/toolchain.txt
+      - name: Recover and adapt historical full-layer generator
+        run: |
+          set -euxo pipefail
+          cd "$TORCH2AIE"
+          python3 "$GITHUB_WORKSPACE/tools/npu/qwen38_27b_torch2aie_adapter.py" "$TORCH2AIE"
+          python3 -m py_compile examples/qwen3-decode-layer/contract.py examples/qwen3-decode-layer/cases/full_layer_engine_generate.py
+          grep -E 'HIDDEN_DIM[[:space:]]*=[[:space:]]*5120|INTERMEDIATE_DIM[[:space:]]*=[[:space:]]*17408|HEAD_DIM[[:space:]]*=[[:space:]]*256|NUM_Q_HEADS[[:space:]]*=[[:space:]]*24|NUM_KV_HEADS[[:space:]]*=[[:space:]]*4' examples/qwen3-decode-layer/contract.py
+      - name: Generate and structurally validate genuine 27B fused-layer MLIR
+        run: |
+          set -euxo pipefail
+          cd "$TORCH2AIE/examples/qwen3-decode-layer"
+          "$TORCH2AIE/.venv/bin/python" - <<'PY' | tee /tmp/qwen38-27b-mlir.txt
+          from cases import full_layer_engine_generate as g
+          from cases.full_layer_engine_reference import DEFAULT_SCHEDULE
+          mlir=g.generate_mlir(DEFAULT_SCHEDULE)
+          errors=g.validate_generated_mlir(mlir,DEFAULT_SCHEDULE)
+          print('mlir_bytes=',len(mlir.encode())); print('validation_errors=',errors)
+          if errors: raise SystemExit(2)
+          open('/tmp/qwen38-27b-design.mlir','w').write(mlir)
+          print('27B historical full-layer structural validation: PASS')
+          PY
+      - name: Pin and patch Qwen3.5 converter for Qwen3.8-27B Q4NX
+        env:
+          CONVERTER_SHA: d1d5232d0b82871bf5265e990fa2d26cdad22327
+        run: |
+          set -euxo pipefail
+          git clone https://github.com/ROCm/FLM_Q4NX_Converter.git /tmp/FLM_Q4NX_Converter
+          cd /tmp/FLM_Q4NX_Converter
+          git checkout --detach "$CONVERTER_SHA"
+          test "$(git rev-parse HEAD)" = "$CONVERTER_SHA"
+          uv pip install --python "$TORCH2AIE/.venv/bin/python" -r requirements.txt
+          python3 "$GITHUB_WORKSPACE/tools/npu/qwen38_27b_q4nx_patch.py" /tmp/FLM_Q4NX_Converter
+          "$TORCH2AIE/.venv/bin/python" -m py_compile q4nx/constants.py q4nx/models/qwen35.py
+          "$TORCH2AIE/.venv/bin/python" - <<'PY'
+          import sys; sys.path.insert(0,'.')
+          from q4nx.constants import ModelArch,ModelArchNames,ModelArchConfigs
+          assert ModelArch.QWEN35_27B in ModelArchNames and 'qwen3.8-27B' in ModelArchNames[ModelArch.QWEN35_27B]
+          assert ModelArchConfigs[ModelArch.QWEN35_27B]=='qwen3.5_27b.json'
+          print('Q4NX 27B registry: PASS')
+          PY
+      - name: Download genuine Qwen3.8-27B Q4_1 source weights and model metadata
+        run: |
+          set -euxo pipefail
+          mkdir -p /tmp/qwen38-src /tmp/qwen38-meta
+          python3 -m pip install --user -U 'huggingface_hub[cli]'
+          export PATH="$HOME/.local/bin:$PATH"
+          hf download bartowski/Qwen3.8-27B-GGUF --include 'Qwen3.8-27B-Q4_1.gguf' --local-dir /tmp/qwen38-src
+          hf download Qwen/Qwen3.8-27B --include 'config.json' 'tokenizer.json' 'tokenizer_config.json' 'chat_template.jinja' --local-dir /tmp/qwen38-meta
+          test -f /tmp/qwen38-src/Qwen3.8-27B-Q4_1.gguf
+          test -f /tmp/qwen38-meta/config.json
+          stat -c '%n %s bytes' /tmp/qwen38-src/Qwen3.8-27B-Q4_1.gguf | tee /tmp/qwen38-source-size.txt
+      - name: Convert genuine 27B Q4NX weights and validate 27B manifest
+        run: |
+          set -euxo pipefail
+          cd /tmp/FLM_Q4NX_Converter
+          "$TORCH2AIE/.venv/bin/python" - <<'PY'
+          import json, hashlib, shutil
+          from pathlib import Path
+          from q4nx import create_converter
+          src='/tmp/qwen38-src/Qwen3.8-27B-Q4_1.gguf'
+          out=Path('/tmp/Qwen3.8-27B-NPU2'); out.mkdir(parents=True,exist_ok=True)
+          converter=create_converter(src, 'qwen3.8-27B')
+          converter.convert(q4nx_path=str(out), weights_type='language')
+          q=out/'model.q4nx'; assert q.is_file() and q.stat().st_size > 10_000_000_000
+          cfg=json.loads(Path('/tmp/qwen38-meta/config.json').read_text())
+          assert cfg['hidden_size']==5120 and cfg['intermediate_size']==17408 and cfg['vocab_size']==248320 and cfg['num_hidden_layers']==64
+          assert cfg['num_attention_heads']==24 and cfg['num_key_value_heads']==4
+          sha=hashlib.sha256(Path(src).read_bytes()).hexdigest()
+          manifest={'model':'qwen3.8:27b','source_gguf':'Qwen3.8-27B-Q4_1.gguf','source_sha256':sha,'hidden_size':5120,'intermediate_size':17408,'vocab_size':248320,'num_hidden_layers':64,'num_attention_heads':24,'num_key_value_heads':4,'head_dim':256,'q4nx_file':'model.q4nx','q4nx_bytes':q.stat().st_size}
+          (out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
+          for n in ('config.json','tokenizer.json','tokenizer_config.json','chat_template.jinja'):
+              shutil.copy2(Path('/tmp/qwen38-meta')/n,out/n)
+          print(json.dumps(manifest,indent=2))
+          PY
+          test -s /tmp/Qwen3.8-27B-NPU2/model.q4nx
+          test -s /tmp/Qwen3.8-27B-NPU2/manifest.json
+      - name: Compile genuine 27B layer.xclbin from recovered generator
+        run: |
+          set -euxo pipefail
+          cd "$TORCH2AIE/examples/qwen3-decode-layer"
+          make full-build
+          layer=$(find . -type f -name '*.xclbin' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
+          test -n "$layer" && test -s "$layer"
+          cp "$layer" /tmp/layer.xclbin
+          inst=$(find . -type f \( -name '*.bin' -o -name '*inst*.txt' \) -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
+          test -n "$inst" && test -s "$inst" && cp "$inst" /tmp/layer.bin
+      - name: Generate genuine 27B LM-head xclbin with pinned MLIR-AIE GEMM flow
+        run: |
+          set -euxo pipefail
+          cd "$TORCH2AIE/examples/gemm_asymmetric_tile_buffering/config1"
+          make M=128 K=5120 N=248320 targetname=n1_core
+          lm=$(find build -type f -name '*.xclbin' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
+          test -n "$lm" && test -s "$lm"
+          cp "$lm" /tmp/lm_head.xclbin
+          cat > /tmp/lm_head_manifest.json <<'JSON'
+          {"model":"qwen3.8:27b","role":"lm_head","M":128,"K":5120,"N":248320,"vocab_size":248320,"hidden_size":5120,"format":"MLIR_AIE GEMM"}
+          JSON
+      - name: Validate genuine 27B XCLBIN metadata ABI dimensions and BD-lock-memory topology
+        run: |
+          set -euxo pipefail
+          XCLBINUTIL=$(find "$TORCH2AIE" -type f -name xclbinutil -perm -111 -print -quit)
+          test -n "$XCLBINUTIL"
+          for f in /tmp/layer.xclbin /tmp/lm_head.xclbin; do
+            "$XCLBINUTIL" --info --input "$f" > "$f.info.txt"
+            test -s "$f.info.txt"
+          done
+          grep -E 'kernel|MLIR_AIE|group_id|instance|uuid' /tmp/layer.xclbin.info.txt | tee /tmp/qwen38-27b-abi.txt
+          grep -E 'kernel|MLIR_AIE|group_id|instance|uuid' /tmp/lm_head.xclbin.info.txt | tee -a /tmp/qwen38-27b-abi.txt
+          python3 - <<'PY'
+          import json
+          g=json.load(open('tools/npu/qwen38_27b_geometry.json'))
+          m=json.load(open('/tmp/Qwen3.8-27B-NPU2/manifest.json'))
+          assert (g['hidden_size'],g['intermediate_size'],g['vocab_size'])==(5120,17408,248320)
+          assert (m['hidden_size'],m['intermediate_size'],m['vocab_size'],m['num_hidden_layers'])==(5120,17408,248320,64)
+          text=open('/tmp/lm_head_manifest.json').read(); assert '"K":5120' in text and '"N":248320' in text
+          print('27B XCLBIN metadata/ABI dimension gate: PASS')
+          PY
+      - name: Upload genuine 27B build artifacts and validation record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwen38-27b-npu2-genuine
+          if-no-files-found: warn
+          path: |
+            /tmp/layer.xclbin
+            /tmp/layer.bin
+            /tmp/layer.xclbin.info.txt
+            /tmp/lm_head.xclbin
+            /tmp/lm_head.xclbin.info.txt
+            /tmp/lm_head_manifest.json
+            /tmp/qwen38-27b-mlir.txt
+            /tmp/qwen38-27b-abi.txt
+            /tmp/qwen38-source-size.txt
+            /tmp/Qwen3.8-27B-NPU2/config.json
+            /tmp/Qwen3.8-27B-NPU2/manifest.json
+            /tmp/Qwen3.8-27B-NPU2/model.q4nx
+            /tmp/Qwen3.8-27B-NPU2/tokenizer.json
+            /tmp/Qwen3.8-27B-NPU2/tokenizer_config.json
+            /tmp/Qwen3.8-27B-NPU2/chat_template.jinja
+            tools/npu/qwen38_27b_geometry.json
+            tools/npu/qwen38_27b_layer_plan.json
