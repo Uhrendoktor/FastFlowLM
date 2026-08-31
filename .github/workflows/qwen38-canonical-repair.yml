@@ -18,9 +18,11 @@ jobs:
           from pathlib import Path
           p=Path('.github/workflows/canonical-execution.yml')
           s=p.read_text()
-          s=s.replace('    env: {HF_TOKEN: ${{ secrets.HF_TOKEN }}}\n', '    env:\n      HF_TOKEN: ${{ secrets.HF_TOKEN }}\n')
+          expr=chr(36)+'{{ secrets.HF_TOKEN }}'
+          s=s.replace('    env: {HF_TOKEN: '+expr+'}\n', '    env:\n      HF_TOKEN: '+expr+'\n')
           p.write_text(s)
           PY
+          ! grep -q 'env: {HF_TOKEN:' .github/workflows/canonical-execution.yml
       - name: Commit repaired canonical workflow
         run: |
           set -euxo pipefail
