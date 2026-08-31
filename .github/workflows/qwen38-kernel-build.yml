@@ -3,6 +3,8 @@ name: Qwen3.8-27B XDNA2 kernel build
 on:
   push:
     branches: [feat/qwen3.8-27b]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
