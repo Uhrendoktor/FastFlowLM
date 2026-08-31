@@ -1,0 +1,78 @@
+name: Qwen3.8-27B XDNA2 kernel build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-kernels:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout FastFlowLM
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Checkout open NPU generator stack
+        run: |
+          git clone --depth 1 https://github.com/1bit-systems/1bit-systems.git /tmp/onebit
+          echo "=== generator candidates ==="
+          find /tmp/onebit -maxdepth 4 -type f \( -name 'build_xclbins.sh' -o -name '*qwen*' -o -name '*peano*' \) | head -200
+
+      - name: Locate Qwen3.5 generator and build recipe
+        run: |
+          set -euxo pipefail
+          cd /tmp/onebit
+          BUILD_SCRIPT=$(find . -name build_xclbins.sh -type f | head -1)
+          test -n "$BUILD_SCRIPT"
+          echo "BUILD_SCRIPT=$BUILD_SCRIPT" >> "$GITHUB_ENV"
+          grep -n -i -E 'qwen3\.5|qwen35|qwen.*9b|17408|5120' "$BUILD_SCRIPT" | head -200 || true
+          grep -R -n -i -E 'qwen3\.5|qwen35|17408|5120' --include='*.py' --include='*.sh' --include='*.json' . | head -300 || true
+
+      - name: Build reference Qwen3.5-9B XCLBINs
+        run: |
+          set -euxo pipefail
+          cd /tmp/onebit
+          bash "$BUILD_SCRIPT" qwen3_5_9b || bash "$BUILD_SCRIPT" qwen35_9b || bash "$BUILD_SCRIPT" qwen3.5_9b
+
+      - name: Derive Qwen3.8-27B geometry
+        run: |
+          cat > /tmp/qwen38_geometry.json <<'EOF'
+          {
+            "hidden_size": 5120,
+            "intermediate_size": 17408,
+            "vocab_size": 248320,
+            "num_hidden_layers": 64,
+            "full_attention_q_heads": 24,
+            "full_attention_kv_heads": 4,
+            "full_attention_head_dim": 256,
+            "linear_attention_q_heads": 16,
+            "linear_attention_v_heads": 48,
+            "linear_attention_head_dim": 128
+          }
+          EOF
+          cat /tmp/qwen38_geometry.json
+
+      - name: Attempt 27B generator build
+        run: |
+          set -euxo pipefail
+          cd /tmp/onebit
+          echo "=== build_xclbins help ==="
+          bash "$BUILD_SCRIPT" --help || true
+          echo "=== relevant generator files ==="
+          find . -type f | grep -E 'generator|qwen|xclbin' | head -300
+          echo "=== candidate Qwen3.5 generator source ==="
+          grep -R -n -i -E '17408|qwen3.*5|qwen35|GateDelta|gated_delta' --include='*.py' --include='*.cpp' --include='*.h' --include='*.sh' . | head -500 || true
+
+      - name: Upload generator diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwen38-generator-diagnostics
+          path: |
+            /tmp/qwen38_geometry.json
+            /tmp/onebit/**/build/**/*.xclbin
+            /tmp/onebit/**/build/**/*.log
+            /tmp/onebit/**/*.py
+            /tmp/onebit/**/build_xclbins.sh
+          if-no-files-found: ignore
