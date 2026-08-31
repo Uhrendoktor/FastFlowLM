@@ -51,6 +51,7 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           bash scripts/setup_python.sh
           source .venv/bin/activate
+          source scripts/env.sh
           echo "TORCH2AIE=$HOME/torch2aie" >> "$GITHUB_ENV"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           echo "$HOME/torch2aie/.venv/bin" >> "$GITHUB_PATH"
@@ -127,12 +128,9 @@ jobs:
         run: |
           set -euxo pipefail
           cd "$TORCH2AIE/examples/qwen3-decode-layer"
-          "$TORCH2AIE/.venv/bin/python" - <<'PY'
-          from pathlib import Path
-          import npu_build
-          mlir=Path('/tmp/qwen38-27b-design.mlir')
-          npu_build.compile_mlir(mlir, Path('/tmp/layer.xclbin'), Path('/tmp/layer.bin'))
-          PY
+          aiecc --aie-generate-xclbin --aie-generate-npu-insts --no-compile-host \
+            --xclbin-name=/tmp/layer.xclbin --npu-insts-name=/tmp/layer.bin \
+            /tmp/qwen38-27b-design.mlir
           test -s /tmp/layer.xclbin
           test -s /tmp/layer.bin
       - name: Generate genuine 27B LM-head xclbin
