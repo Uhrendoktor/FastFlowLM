@@ -88,10 +88,10 @@ jobs:
           cd /tmp/FLM_Q4NX_Converter
           git checkout --detach "$CONVERTER_SHA"
           test "$(git rev-parse HEAD)" = "$CONVERTER_SHA"
-          python3 -m pip install -r requirements.txt
+          uv pip install --python "$TORCH2AIE/.venv/bin/python" -r requirements.txt
           python3 "$GITHUB_WORKSPACE/tools/npu/qwen38_27b_q4nx_patch.py" /tmp/FLM_Q4NX_Converter
-          python3 -m py_compile q4nx/constants.py q4nx/models/qwen35.py
-          python3 - <<'PY'
+          "$TORCH2AIE/.venv/bin/python" -m py_compile q4nx/constants.py q4nx/models/qwen35.py
+          "$TORCH2AIE/.venv/bin/python" - <<'PY'
           import sys; sys.path.insert(0,'.')
           from q4nx.constants import ModelArch,ModelArchNames,ModelArchConfigs
           assert ModelArch.QWEN35_27B in ModelArchNames and 'qwen3.8-27B' in ModelArchNames[ModelArch.QWEN35_27B]
@@ -113,7 +113,7 @@ jobs:
         run: |
           set -euxo pipefail
           cd /tmp/FLM_Q4NX_Converter
-          python3 - <<'PY'
+          "$TORCH2AIE/.venv/bin/python" - <<'PY'
           import json, hashlib, shutil
           from pathlib import Path
           from q4nx import create_converter
@@ -167,7 +167,7 @@ jobs:
           grep -E 'kernel|MLIR_AIE|group_id|instance|uuid' /tmp/layer.xclbin.info.txt | tee /tmp/qwen38-27b-abi.txt
           grep -E 'kernel|MLIR_AIE|group_id|instance|uuid' /tmp/lm_head.xclbin.info.txt | tee -a /tmp/qwen38-27b-abi.txt
           python3 - <<'PY'
-          import json,re
+          import json
           g=json.load(open('tools/npu/qwen38_27b_geometry.json'))
           m=json.load(open('/tmp/Qwen3.8-27B-NPU2/manifest.json'))
           assert (g['hidden_size'],g['intermediate_size'],g['vocab_size'])==(5120,17408,248320)
