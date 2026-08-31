@@ -2,7 +2,7 @@
 """Derive the Qwen3.8-27B hybrid layer plan from its actual geometry.
 
 The plan is intentionally separate from the historical dense Qwen3 full-layer
-runner.  It is the contract the eventual AIE generator must consume.
+runner. It is the contract the eventual AIE generator must consume.
 """
 from __future__ import annotations
 
@@ -52,7 +52,8 @@ def make_plan() -> dict:
             })
         else:
             qk_width = LINEAR_QK * LINEAR_HD
-            vz_width = LINEAR_V * LINEAR_HD
+            value_width = LINEAR_V * LINEAR_HD
+            qkv_width = qk_width + qk_width + value_width
             layers.append({
                 "index": i,
                 "kind": kind,
@@ -61,9 +62,11 @@ def make_plan() -> dict:
                 "v_heads": LINEAR_V,
                 "head_dim": LINEAR_HD,
                 "qk_width": qk_width,
-                "value_width": vz_width,
-                "qkvz_width": qk_width + qk_width + vz_width + vz_width,
-                "conv_channels": qk_width + qk_width + vz_width + vz_width,
+                "value_width": value_width,
+                "qkv_width": qkv_width,
+                "z_width": value_width,
+                "qkvz_width": qkv_width + value_width,
+                "conv_channels": qkv_width,
                 "conv_kernel": CONV_K,
                 "a_projection_width": LINEAR_V,
                 "b_projection_width": LINEAR_V,
@@ -101,9 +104,13 @@ def validate(plan: dict) -> None:
     for x in linear:
         assert x["qk_width"] == 2048
         assert x["value_width"] == 6144
-        assert x["qkvz_width"] == 14336
-        assert x["conv_channels"] == 14336
+        assert x["qkv_width"] == 10240
+        assert x["z_width"] == 6144
+        assert x["qkvz_width"] == 16384
+        assert x["conv_channels"] == 10240
         assert x["conv_kernel"] == 4
+        assert x["a_projection_width"] == 48
+        assert x["b_projection_width"] == 48
         assert x["mlp_gate_up_width"] == 34816
 
 
