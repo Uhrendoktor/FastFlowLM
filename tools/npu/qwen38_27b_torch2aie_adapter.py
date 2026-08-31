@@ -23,7 +23,6 @@ def patch(root: Path) -> None:
         'NUM_Q_HEADS = 16': 'NUM_Q_HEADS = 24',
         'NUM_KV_HEADS = 8': 'NUM_KV_HEADS = 4',
         'C6R2_INPUT_DWORDS = 512': 'C6R2_INPUT_DWORDS = HIDDEN_DIM // 2',
-        'SHAPE_CARRIER_DWORDS = 80': 'SHAPE_CARRIER_DWORDS = 60',
         '# === Qwen3-0.6B specific aux sizes ===': '# === Qwen3.8-27B specific aux sizes ===',
     })
     text = p.read_text()
@@ -39,14 +38,11 @@ def patch(root: Path) -> None:
     if (HIDDEN_DIM,INTERMEDIATE_DIM,HEAD_DIM,NUM_Q_HEADS,NUM_KV_HEADS)!=(5120,17408,256,24,4): errors.append('not the Qwen3.8-27B contract')
     if GQA_RATIO!=6: errors.append(f'GQA ratio mismatch: {GQA_RATIO}')
     if C6R2_INPUT_DWORDS!=HIDDEN_DIM//2: errors.append(f'C6R2 input mismatch: {C6R2_INPUT_DWORDS}')
-    if SHAPE_CARRIER_DWORDS!=60: errors.append(f'carrier mismatch: {SHAPE_CARRIER_DWORDS}')
     return errors
 '''
     p.write_text(text)
 
-    replace(ex / 'qkv_compact_reference.py', {
-        'WINDOW_DWORDS = 512': 'WINDOW_DWORDS = ATTENTION_PACKET_DWORDS // 4',
-    })
+    replace(ex / 'qkv_compact_reference.py', {'WINDOW_DWORDS = 512': 'WINDOW_DWORDS = ATTENTION_PACKET_DWORDS // 4'})
     replace(ex / 'cases/attention_block_reference.py', {
         'HEADS_PER_WINDOW = 8': 'HEADS_PER_WINDOW = 6',
         'KV_HEADS_PER_WINDOW = 2': 'KV_HEADS_PER_WINDOW = 1',
@@ -64,9 +60,6 @@ def patch(root: Path) -> None:
         'attention return window must be 512 dwords': 'attention return window must be 768 dwords',
     })
 
-    # Keep the historical bank-safe hub BD mapping. Four Q/KV windows use the
-    # first four entries; the down-output stream gets ten fresh high-bank BDs
-    # because the 27B O projection has ten body records.
     c = ex / 'compact_dataflow.py'
     t = c.read_text()
     for a, b in {
@@ -85,18 +78,9 @@ def patch(root: Path) -> None:
     t = t.replace('WEIGHT_SPAN_CHUNKS = QKV_BODY_WEIGHT_CHUNKS', 'WEIGHT_SPAN_CHUNKS = 384')
     t = t.replace('aie.use_lock(%hub_return_full, AcquireGreaterEqual, 8)', 'aie.use_lock(%hub_return_full, AcquireGreaterEqual, 4)')
     t = t.replace('aie.use_lock(%hub_return_empty, Release, 8)', 'aie.use_lock(%hub_return_empty, Release, 4)')
-    t = t.replace(
-        'or HUB_Q_OUT_BDS != (25, 2, 26, 3, 37, 5, 36, 8)',
-        'or HUB_Q_OUT_BDS != (25, 2, 26, 3)',
-    )
-    t = t.replace(
-        'or HUB_RETURN_IN_BDS != (4, 28, 6, 30, 9, 38, 11, 39)',
-        'or HUB_RETURN_IN_BDS != (4, 28, 6, 30)',
-    )
-    t = t.replace(
-        'or HUB_DOWN_OUT_BDS != (27, 29, 31, 32, 33, 42, 43, 44)',
-        'or HUB_DOWN_OUT_BDS != (44, 45, 46, 47, 48, 49, 50, 51, 52, 53)',
-    )
+    t = t.replace('or HUB_Q_OUT_BDS != (25, 2, 26, 3, 37, 5, 36, 8)', 'or HUB_Q_OUT_BDS != (25, 2, 26, 3)')
+    t = t.replace('or HUB_RETURN_IN_BDS != (4, 28, 6, 30, 9, 38, 11, 39)', 'or HUB_RETURN_IN_BDS != (4, 28, 6, 30)')
+    t = t.replace('or HUB_DOWN_OUT_BDS != (27, 29, 31, 32, 33, 42, 43, 44)', 'or HUB_DOWN_OUT_BDS != (44, 45, 46, 47, 48, 49, 50, 51, 52, 53)')
     t = t.replace('or HUB_Q_OUT_CHANNELS != (1, 2, 3, 4, 1, 2, 3, 4)', 'or HUB_Q_OUT_CHANNELS != (1, 2, 3, 4)')
     t = t.replace('or HUB_RETURN_IN_CHANNELS != (2, 3, 4, 5, 2, 3, 4, 5)', 'or HUB_RETURN_IN_CHANNELS != (2, 3, 4, 5)')
     t = t.replace('or carrier_dwords != 80', 'or carrier_dwords != 60')
