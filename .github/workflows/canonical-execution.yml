@@ -4,6 +4,7 @@ on:
     branches: [feat/qwen3.8-27b]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, edited]
   workflow_dispatch:
 permissions:
   contents: write
@@ -65,40 +66,26 @@ jobs:
           /tmp/q4nx/bin/python - "$SRC" <<'PY'
           import sys
           from gguf import GGUFReader
-          from pathlib import Path
-          r=GGUFReader(sys.argv[1])
-          f=r.fields
+          r=GGUFReader(sys.argv[1]); f=r.fields
           def val(suffix):
               for k,v in f.items():
                   if k.endswith(suffix):
                       x=v.parts[-1] if hasattr(v,'parts') else v
                       if isinstance(x,(bytes,bytearray)): return x.decode(errors='ignore')
                       return x
-          checks={'architecture':val('.general.architecture'),'blocks':val('.block_count'),'hidden':val('.embedding_length'),'ffn':val('.feed_forward_length'),'heads':val('.attention.head_count'),'kv_heads':val('.attention.head_count_kv'),'head_dim':val('.attention.key_length')}
-          print(checks)
-          assert str(checks['architecture']).lower() in ('qwen3.5','qwen3_5','qwen35')
-          assert int(checks['blocks'])==64 and int(checks['hidden'])==5120 and int(checks['ffn'])==17408
-          assert int(checks['heads'])==24 and int(checks['kv_heads'])==4 and int(checks['head_dim'])==256
-          toks=val('.tokenizer.ggml.tokens'); assert toks is not None
-          try: assert len(toks)==248320
-          except TypeError: pass
+          c={'architecture':val('.general.architecture'),'blocks':val('.block_count'),'hidden':val('.embedding_length'),'ffn':val('.feed_forward_length'),'heads':val('.attention.head_count'),'kv_heads':val('.attention.head_count_kv'),'head_dim':val('.attention.key_length')}; print(c)
+          assert str(c['architecture']).lower() in ('qwen3.5','qwen3_5','qwen35'); assert int(c['blocks'])==64 and int(c['hidden'])==5120 and int(c['ffn'])==17408; assert int(c['heads'])==24 and int(c['kv_heads'])==4 and int(c['head_dim'])==256
           PY
           /tmp/q4nx/bin/python - <<'PY'
           import json,hashlib,shutil
           from pathlib import Path
           from q4nx import create_converter
           from q4nx.constants import ModelArch,ModelArchNames,ModelArchConfigs
-          assert ModelArch.QWEN35_27B in ModelArchNames and 'qwen3.8-27B' in ModelArchNames[ModelArch.QWEN35_27B]
-          assert ModelArchConfigs[ModelArch.QWEN35_27B]=='qwen3.5_27b.json'
-          src=next(Path('/tmp/src').glob('*.gguf')); out=Path('/tmp/pkg'); out.mkdir()
-          create_converter(str(src),'qwen3.8-27B').convert(q4nx_path=str(out),weights_type='language')
-          q=out/'model.q4nx'; assert q.is_file() and q.stat().st_size>10_000_000_000
-          c=json.loads(Path('/tmp/meta/config.json').read_text())
-          for k,v in {'hidden_size':5120,'intermediate_size':17408,'vocab_size':248320,'num_hidden_layers':64,'num_attention_heads':24,'num_key_value_heads':4}.items(): assert int(c[k])==v
-          m={'model':'qwen3.8:27b','architecture':'qwen3.5','source_gguf':src.name,'source_sha256':hashlib.sha256(src.read_bytes()).hexdigest(),'hidden_size':5120,'intermediate_size':17408,'vocab_size':248320,'num_hidden_layers':64,'num_attention_heads':24,'num_key_value_heads':4,'head_dim':256,'layer_types':['linear_attention','linear_attention','linear_attention','full_attention']*16,'q4nx_file':'model.q4nx','q4nx_bytes':q.stat().st_size,'q4nx_sha256':hashlib.sha256(q.read_bytes()).hexdigest()}
-          (out/'manifest.json').write_text(json.dumps(m,indent=2)+'\n')
-          for n in ('config.json','tokenizer.json','tokenizer_config.json','chat_template.jinja'): shutil.copy2(Path('/tmp/meta')/n,out/n)
-          print(json.dumps(m,indent=2))
+          assert ModelArch.QWEN35_27B in ModelArchNames and 'qwen3.8-27B' in ModelArchNames[ModelArch.QWEN35_27B] and ModelArchConfigs[ModelArch.QWEN35_27B]=='qwen3.5_27b.json'
+          src=next(Path('/tmp/src').glob('*.gguf')); out=Path('/tmp/pkg'); out.mkdir(); create_converter(str(src),'qwen3.8-27B').convert(q4nx_path=str(out),weights_type='language'); q=out/'model.q4nx'; assert q.is_file() and q.stat().st_size>10_000_000_000
+          c=json.loads(Path('/tmp/meta/config.json').read_text()); [(_ for _ in ()).throw(AssertionError(f'{k}={c[k]}')) for k,v in {'hidden_size':5120,'intermediate_size':17408,'vocab_size':248320,'num_hidden_layers':64,'num_attention_heads':24,'num_key_value_heads':4}.items() if int(c[k])!=v]
+          m={'model':'qwen3.8:27b','architecture':'qwen3.5','source_gguf':src.name,'source_sha256':hashlib.sha256(src.read_bytes()).hexdigest(),'hidden_size':5120,'intermediate_size':17408,'vocab_size':248320,'num_hidden_layers':64,'num_attention_heads':24,'num_key_value_heads':4,'head_dim':256,'layer_types':['linear_attention','linear_attention','linear_attention','full_attention']*16,'q4nx_file':'model.q4nx','q4nx_bytes':q.stat().st_size,'q4nx_sha256':hashlib.sha256(q.read_bytes()).hexdigest()}; (out/'manifest.json').write_text(json.dumps(m,indent=2)+'\n')
+          for n in ('config.json','tokenizer.json','tokenizer_config.json','chat_template.jinja'): shutil.copy2(Path('/tmp/meta')/n,out/n); print(json.dumps(m,indent=2))
           PY
       - uses: actions/upload-artifact@v4
         with:
@@ -114,27 +101,13 @@ jobs:
       - name: Generate genuine 27B layer.xclbin with Peano
         run: |
           set -euxo pipefail
-          git clone "$TORCH2AIE_REPO" "$HOME/torch2aie"; cd "$HOME/torch2aie"; git checkout --detach "$TORCH2AIE_SHA"
-          grep -qx 'tag=toolchain-2026-06-02' <(grep '^tag=' toolchain-release.lock)
-          grep -qx 'archive_sha256=70222aa334057fde23be96b8763fb63b53ff7615ec004ac16ecba3abb3d5aefb' <(grep '^archive_sha256=' toolchain-release.lock)
-          bash scripts/install_toolchain_from_release.sh
-          python3 -m pip install --user uv; export PATH="$HOME/.local/bin:$PATH"; bash scripts/setup_python.sh; source .venv/bin/activate; source scripts/env.sh
-          PEANO=$(find "$HOME/torch2aie/toolchain" -type f -path '*/bin/clang++' -perm -111 -print -quit); test -n "$PEANO"; export PEANO_INSTALL_DIR="$(dirname "$(dirname "$PEANO")")"; export QWEN38_USE_PEANO=1; export QWEN38_27B_BUILD_ONLY=1
-          cd examples/qwen3-decode-layer
-          python3 "$GITHUB_WORKSPACE/tools/npu/qwen38_27b_torch2aie_adapter.py" "$HOME/torch2aie"
-          python3 "$GITHUB_WORKSPACE/tools/npu/qwen38_27b_build_patch_v3.py" "$HOME/torch2aie"
-          "$HOME/torch2aie/.venv/bin/python" -m py_compile cases/full_layer_engine_generate.py cases/qwen3_8b_decode_layer_runner.py npu_build.py
-          make CURRENT_TOKEN=31 LAYER=0 MODEL_PATH=/nonexistent full-build
-          X=$(find build -type f -name '*.xclbin' -printf '%T@ %p\n'|sort -nr|head -1|cut -d' ' -f2-); test -s "$X"
-          MLIR=$(find build -type f -name 'design.mlir' -printf '%T@ %p\n'|sort -nr|head -1|cut -d' ' -f2-); test -s "$MLIR"
-          mkdir -p "$GITHUB_WORKSPACE/layer-artifact"; cp "$X" "$GITHUB_WORKSPACE/layer-artifact/layer.xclbin"; cp "$MLIR" "$GITHUB_WORKSPACE/layer-artifact/layer.mlir"
-          python3 - <<'PY'
+          git clone "$TORCH2AIE_REPO" "$HOME/torch2aie"; cd "$HOME/torch2aie"; git checkout --detach "$TORCH2AIE_SHA"; grep -qx 'tag=toolchain-2026-06-02' <(grep '^tag=' toolchain-release.lock); grep -qx 'archive_sha256=70222aa334057fde23be96b8763fb63b53ff7615ec004ac16ecba3abb3d5aefb' <(grep '^archive_sha256=' toolchain-release.lock); bash scripts/install_toolchain_from_release.sh; python3 -m pip install --user uv; export PATH="$HOME/.local/bin:$PATH"; bash scripts/setup_python.sh; source .venv/bin/activate; source scripts/env.sh
+          PEANO=$(find "$HOME/torch2aie/toolchain" -type f -path '*/bin/clang++' -perm -111 -print -quit); test -n "$PEANO"; export PEANO_INSTALL_DIR="$(dirname "$(dirname "$PEANO")")"; export QWEN38_USE_PEANO=1; export QWEN38_27B_BUILD_ONLY=1; cd examples/qwen3-decode-layer; python3 "$GITHUB_WORKSPACE/tools/npu/qwen38_27b_torch2aie_adapter.py" "$HOME/torch2aie"; python3 "$GITHUB_WORKSPACE/tools/npu/qwen38_27b_build_patch_v3.py" "$HOME/torch2aie"; "$HOME/torch2aie/.venv/bin/python" -m py_compile cases/full_layer_engine_generate.py cases/qwen3_8b_decode_layer_runner.py npu_build.py; make CURRENT_TOKEN=31 LAYER=0 MODEL_PATH=/nonexistent full-build
+          X=$(find build -type f -name '*.xclbin' -printf '%T@ %p\n'|sort -nr|head -1|cut -d' ' -f2-); MLIR=$(find build -type f -name 'design.mlir' -printf '%T@ %p\n'|sort -nr|head -1|cut -d' ' -f2-); test -s "$X"; test -s "$MLIR"; mkdir -p "$GITHUB_WORKSPACE/layer-artifact"; cp "$X" "$GITHUB_WORKSPACE/layer-artifact/layer.xclbin"; cp "$MLIR" "$GITHUB_WORKSPACE/layer-artifact/layer.mlir"; python3 - <<'PY'
           import json
-          m={'model':'qwen3.8:27b','hidden_size':5120,'intermediate_size':17408,'vocab_size':248320,'num_hidden_layers':64,'num_attention_heads':24,'num_key_value_heads':4,'head_dim':256,'layer_types':['linear_attention','linear_attention','linear_attention','full_attention']*16}
-          open('/home/runner/work/FastFlowLM/FastFlowLM/layer-artifact/manifest.json','w').write(json.dumps(m,indent=2)+'\n')
+          m={'model':'qwen3.8:27b','hidden_size':5120,'intermediate_size':17408,'vocab_size':248320,'num_hidden_layers':64,'num_attention_heads':24,'num_key_value_heads':4,'head_dim':256,'layer_types':['linear_attention','linear_attention','linear_attention','full_attention']*16}; open('/home/runner/work/FastFlowLM/FastFlowLM/layer-artifact/manifest.json','w').write(json.dumps(m,indent=2)+'\n')
           PY
-          XU=$(find "$HOME/torch2aie" -type f -name xclbinutil -perm -111 -print -quit); test -n "$XU"
-          python3 "$GITHUB_WORKSPACE/tools/npu/qwen38_27b_xclbin_validator.py" --xclbin "$GITHUB_WORKSPACE/layer-artifact/layer.xclbin" --xclbinutil "$XU" --label layer.xclbin --mlir "$GITHUB_WORKSPACE/layer-artifact/layer.mlir" --manifest "$GITHUB_WORKSPACE/layer-artifact/manifest.json" | tee "$GITHUB_WORKSPACE/layer-artifact/validation.json"
+          XU=$(find "$HOME/torch2aie" -type f -name xclbinutil -perm -111 -print -quit); python3 "$GITHUB_WORKSPACE/tools/npu/qwen38_27b_xclbin_validator.py" --xclbin "$GITHUB_WORKSPACE/layer-artifact/layer.xclbin" --xclbinutil "$XU" --label layer.xclbin --mlir "$GITHUB_WORKSPACE/layer-artifact/layer.mlir" --manifest "$GITHUB_WORKSPACE/layer-artifact/manifest.json" | tee "$GITHUB_WORKSPACE/layer-artifact/validation.json"
       - uses: actions/upload-artifact@v4
         with:
           name: qwen38-27b-layer
@@ -149,13 +122,7 @@ jobs:
       - name: Generate genuine 27B lm_head.xclbin with the runtime GEMM ABI
         run: |
           set -euxo pipefail
-          git clone "$TORCH2AIE_REPO" "$HOME/torch2aie"; cd "$HOME/torch2aie"; git checkout --detach "$TORCH2AIE_SHA"; bash scripts/install_toolchain_from_release.sh; python3 -m pip install --user uv; export PATH="$HOME/.local/bin:$PATH"; bash scripts/setup_python.sh; source .venv/bin/activate; source scripts/env.sh
-          python3 "$GITHUB_WORKSPACE/tools/npu/qwen38_27b_lm_head_build_v2.py" "$HOME/torch2aie"
-          X="$HOME/torch2aie/lm_head.xclbin"; test -s "$X"
-          mkdir -p "$GITHUB_WORKSPACE/lm-head-artifact"; cp "$X" "$GITHUB_WORKSPACE/lm-head-artifact/lm_head.xclbin"; cp "$HOME/torch2aie/lm_head.mlir" "$GITHUB_WORKSPACE/lm-head-artifact/lm_head.mlir"; cp "$HOME/torch2aie/lm_head.manifest.json" "$GITHUB_WORKSPACE/lm-head-artifact/manifest.json"
-          curl -L --fail --retry 3 https://raw.githubusercontent.com/Uhrendoktor/FastFlowLM/feat/qwen3.8-27b/src/xclbins/Qwen3.5-9B-NPU2/lm_head.xclbin -o /tmp/reference-lm-head.xclbin
-          XU=$(find "$HOME/torch2aie" -type f -name xclbinutil -perm -111 -print -quit); test -n "$XU"; "$XU" --info --input /tmp/reference-lm-head.xclbin >/tmp/reference-lm-head.info
-          python3 "$GITHUB_WORKSPACE/tools/npu/qwen38_27b_xclbin_validator.py" --xclbin "$GITHUB_WORKSPACE/lm-head-artifact/lm_head.xclbin" --xclbinutil "$XU" --label lm_head.xclbin --mlir "$GITHUB_WORKSPACE/lm-head-artifact/lm_head.mlir" --manifest "$GITHUB_WORKSPACE/lm-head-artifact/manifest.json" --reference-info /tmp/reference-lm-head.info | tee "$GITHUB_WORKSPACE/lm-head-artifact/validation.json"
+          git clone "$TORCH2AIE_REPO" "$HOME/torch2aie"; cd "$HOME/torch2aie"; git checkout --detach "$TORCH2AIE_SHA"; bash scripts/install_toolchain_from_release.sh; python3 -m pip install --user uv; export PATH="$HOME/.local/bin:$PATH"; bash scripts/setup_python.sh; source .venv/bin/activate; source scripts/env.sh; python3 "$GITHUB_WORKSPACE/tools/npu/qwen38_27b_lm_head_build_v2.py" "$HOME/torch2aie"; X="$HOME/torch2aie/lm_head.xclbin"; test -s "$X"; mkdir -p "$GITHUB_WORKSPACE/lm-head-artifact"; cp "$X" "$GITHUB_WORKSPACE/lm-head-artifact/lm_head.xclbin"; cp "$HOME/torch2aie/lm_head.mlir" "$GITHUB_WORKSPACE/lm-head-artifact/lm_head.mlir"; cp "$HOME/torch2aie/lm_head.manifest.json" "$GITHUB_WORKSPACE/lm-head-artifact/manifest.json"; curl -L --fail --retry 3 https://raw.githubusercontent.com/Uhrendoktor/FastFlowLM/feat/qwen3.8-27b/src/xclbins/Qwen3.5-9B-NPU2/lm_head.xclbin -o /tmp/reference-lm-head.xclbin; XU=$(find "$HOME/torch2aie" -type f -name xclbinutil -perm -111 -print -quit); "$XU" --info --input /tmp/reference-lm-head.xclbin >/tmp/reference-lm-head.info; python3 "$GITHUB_WORKSPACE/tools/npu/qwen38_27b_xclbin_validator.py" --xclbin "$GITHUB_WORKSPACE/lm-head-artifact/lm_head.xclbin" --xclbinutil "$XU" --label lm_head.xclbin --mlir "$GITHUB_WORKSPACE/lm-head-artifact/lm_head.mlir" --manifest "$GITHUB_WORKSPACE/lm-head-artifact/manifest.json" --reference-info /tmp/reference-lm-head.info | tee "$GITHUB_WORKSPACE/lm-head-artifact/validation.json"
       - uses: actions/upload-artifact@v4
         with:
           name: qwen38-27b-lm-head
@@ -168,39 +135,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with:
-          name: qwen38-27b-q4nx
-          path: package
+        with: {name: qwen38-27b-q4nx, path: package}
       - uses: actions/download-artifact@v4
-        with:
-          name: qwen38-27b-layer
-          path: package/layer
+        with: {name: qwen38-27b-layer, path: package/layer}
       - uses: actions/download-artifact@v4
-        with:
-          name: qwen38-27b-lm-head
-          path: package/lm-head
+        with: {name: qwen38-27b-lm-head, path: package/lm-head}
       - name: Build package and execute flm pull
         run: |
           set -euxo pipefail
-          mkdir -p package/xclbins package/layer package/lm-head
-          cp package/layer/layer.xclbin package/xclbins/layer.xclbin
-          cp package/lm-head/lm_head.xclbin package/xclbins/lm_head.xclbin
+          mkdir -p package/xclbins; cp package/layer/layer.xclbin package/xclbins/layer.xclbin; cp package/lm-head/lm_head.xclbin package/xclbins/lm_head.xclbin
           python3 - <<'PY'
           import json,hashlib
           from pathlib import Path
-          root=Path('package'); files=[]
-          for p in root.rglob('*'):
-              if p.is_file(): files.append({'path':str(p.relative_to(root)),'size':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
-          (root/'tree.json').write_text(json.dumps(files,indent=2)+'\n')
-          p=Path('src/model_list.json'); d=json.loads(p.read_text()); d['models'].setdefault('qwen3.8',{})['27b']={'name':'Qwen3.8-27B-NPU2','url':'http://127.0.0.1:8765','file_url':'http://127.0.0.1:8765/tree.json','size':(root/'model.q4nx').stat().st_size,'flm_min_version':'0.9.43','files':['config.json','model.q4nx','tokenizer.json','tokenizer_config.json','chat_template.jinja','xclbins/layer.xclbin','xclbins/lm_head.xclbin'],'details':{'family':'qwen3.5','parameter_size':'27B','quantization_level':'Q4NX'}}; p.write_text(json.dumps(d,indent=2)+'\n')
+          root=Path('package'); (root/'tree.json').write_text(json.dumps([{'path':str(p.relative_to(root)),'size':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in root.rglob('*') if p.is_file()],indent=2)+'\n'); p=Path('src/model_list.json'); d=json.loads(p.read_text()); d['models'].setdefault('qwen3.8',{})['27b']={'name':'Qwen3.8-27B-NPU2','url':'http://127.0.0.1:8765','file_url':'http://127.0.0.1:8765/tree.json','size':(root/'model.q4nx').stat().st_size,'flm_min_version':'0.9.43','files':['config.json','model.q4nx','tokenizer.json','tokenizer_config.json','chat_template.jinja','xclbins/layer.xclbin','xclbins/lm_head.xclbin'],'details':{'family':'qwen3.5','parameter_size':'27B','quantization_level':'Q4NX'}}; p.write_text(json.dumps(d,indent=2)+'\n')
           PY
-          cmake --preset linux-default; cmake --build src/build --target flm -j2
-          python3 -m http.server 8765 --directory package >/tmp/qwen38-http.log 2>&1 &
-          FLM=$(find src/build -type f -name flm -perm -111 -print -quit); test -n "$FLM"; export FLM_MODEL_PATH=/tmp/flm-models; mkdir -p "$FLM_MODEL_PATH"; "$FLM" pull qwen3.8:27b
-          INST=$(find "$FLM_MODEL_PATH" -type f -name model.q4nx -print -quit); test -s "$INST"; find "$FLM_MODEL_PATH" -type f -name layer.xclbin -o -name lm_head.xclbin
-          sha256sum package/model.q4nx package/xclbins/layer.xclbin package/xclbins/lm_head.xclbin | tee package/final-hashes.txt
+          cmake --preset linux-default; cmake --build src/build --target flm -j2; python3 -m http.server 8765 --directory package >/tmp/qwen38-http.log 2>&1 &; FLM=$(find src/build -type f -name flm -perm -111 -print -quit); export FLM_MODEL_PATH=/tmp/flm-models; mkdir -p "$FLM_MODEL_PATH"; "$FLM" pull qwen3.8:27b; test -s "$(find "$FLM_MODEL_PATH" -type f -name model.q4nx -print -quit)"; sha256sum package/model.q4nx package/xclbins/layer.xclbin package/xclbins/lm_head.xclbin | tee package/final-hashes.txt
       - uses: actions/upload-artifact@v4
-        with:
-          name: qwen38-27b-final-package
-          path: package
-          retention-days: 30
+        with: {name: qwen38-27b-final-package, path: package, retention-days: 30}
