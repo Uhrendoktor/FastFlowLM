@@ -61,45 +61,70 @@ jobs:
           git fetch origin pull/1111/head:pr-1111 || true
           git fetch origin pull/1185/head:pr-1185 || true
           git fetch origin 5525db348bcfdbf455d6b6c30019d4c736103e69 || true
-          git log --all --oneline --decorate -120 > /tmp/onebit-history.txt
-          printf '%s\n' '=== relevant history ==='
-          git log --all --oneline --decorate --grep='Q4NX\|Qwen3.5\|kernel generation\|full-layer\|FastFlowLM' -i -80 || true
-          printf '%s\n' '=== generator/config candidates ==='
-          find . -type f \( -name '*.py' -o -name '*.sh' -o -name '*.json' -o -name '*.md' \) -print0 |
-            xargs -0 grep -n -i -E 'qwen3\.5|qwen35|qwen.*9b|qwen3\.8|17408|5120|design_full_layer|lm_head\.xclbin|Q4NX' 2>/dev/null |
-            head -2000 || true
-          test -f engine/npu/build_xclbins.sh
-          git show pr-1185:engine/npu/build_xclbins.sh > /tmp/build_xclbins_pr1185.sh
-          grep -n -i -E 'qwen3\.5|qwen35|qwen.*9b' /tmp/build_xclbins_pr1185.sh | tee /tmp/qwen35_recipe_lines.txt
-          test -s /tmp/qwen35_recipe_lines.txt
+          git log --all --oneline --decorate -160 > /tmp/onebit-history.txt
+          git log --all --oneline --decorate --grep='Q4NX\|Qwen3.5\|kernel generation\|full-layer\|FastFlowLM' -i -120 | tee /tmp/relevant_history.txt || true
+          printf '%s\n' '=== generator refs ==='
+          grep -R -n -E 'full_layer_engine_generate|run_full_layer.py|qwen3_constants|q4nx_to_chunk|gguf_to_q4nx' --include='*.py' --include='*.sh' --include='*.md' . | head -2000 | tee /tmp/generator_refs.txt || true
 
-      - name: Verify official Qwen3.5-9B XCLBIN ABI reference
+      - name: Establish upstream Qwen3.5-9B reference ABI
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euxo pipefail
           mkdir -p /tmp/flm-qwen35-9b
-          for name in GateDeltaNet_prefill attn conv layer lm_head mm vision_attn vision_mm; do
-            curl -fL --retry 3 -o "/tmp/flm-qwen35-9b/${name}.xclbin" \
-              "https://raw.githubusercontent.com/ROCm/FastFlowLM/main/src/xclbins/Qwen3.5-9B-NPU2/${name}.xclbin"
-          done
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            https://api.github.com/repos/ROCm/FastFlowLM/contents/src/xclbins/Qwen3.5-9B-NPU2 |
+            python3 -c 'import json,sys; print("\n".join(x["download_url"] for x in json.load(sys.stdin) if x.get("name","").endswith(".xclbin")))' |
+            tee /tmp/qwen35_urls.txt
+          test -s /tmp/qwen35_urls.txt
+          while read -r url; do curl -fL --retry 3 -o "/tmp/flm-qwen35-9b/$(basename "$url")" "$url"; done < /tmp/qwen35_urls.txt
           find /tmp/flm-qwen35-9b -type f -name '*.xclbin' -printf '%f %s bytes\n' | sort | tee /tmp/qwen35_sizes.txt
           XCLBINUTIL=$(find "$TORCH2AIE" -type f -name xclbinutil -print -quit || true)
           test -n "$XCLBINUTIL"
           for f in /tmp/flm-qwen35-9b/*.xclbin; do
             "$XCLBINUTIL" --info --input "$f" > "$f.info.txt"
           done
+          grep -R -E 'KERNEL|kernel|uuid|aie' /tmp/flm-qwen35-9b/*.info.txt | head -200 | tee /tmp/qwen35_abi_summary.txt || true
 
-      - name: Build known-good Qwen3.5-9B reference
+      - name: Validate the real full-layer generator/toolchain contract
         run: |
           set -euxo pipefail
-          cd /tmp/onebit
-          SCRIPT=/tmp/build_xclbins_pr1185.sh
-          RECIPE=$(grep -Eo 'qwen[0-9a-z_.-]*9b' "$SCRIPT" | tr '[:upper:]' '[:lower:]' | sort -u | head -1)
-          test -n "$RECIPE"
-          printf 'Recovered exact Qwen3.5-9B recipe token: %s\n' "$RECIPE" | tee /tmp/qwen35_recipe.txt
-          bash "$SCRIPT" --help || true
-          bash "$SCRIPT" "$RECIPE"
-          find . -type f -name '*.xclbin' -printf '%p %s bytes\n' | sort | tee /tmp/generated_qwen35_xclbins.txt
-          test -s /tmp/generated_qwen35_xclbins.txt
+          cd "$TORCH2AIE/examples/qwen3-decode-layer"
+          test -f run_full_layer.py
+          test -f cases/full_layer_engine_generate.py
+          python3 - <<'PY' | tee /tmp/full_layer_generator_check.txt
+          from cases import full_layer_engine_generate as g
+          from cases.full_layer_engine_reference import DEFAULT_SCHEDULE
+          mlir = g.generate_mlir(DEFAULT_SCHEDULE)
+          errors = g.validate_generated_mlir(mlir, DEFAULT_SCHEDULE)
+          print('mlir_bytes=', len(mlir.encode()))
+          print('validation_errors=', len(errors))
+          for e in errors:
+              print('ERROR:', e)
+          if errors:
+              raise SystemExit(2)
+          PY
+          python3 -m py_compile cases/full_layer_engine_generate.py run_full_layer.py
+          rm -rf build/ci-reference
+          mkdir -p build/ci-reference
+          python3 - <<'PY'
+          from pathlib import Path
+          from cases import full_layer_engine_generate as g
+          from cases.full_layer_engine_reference import DEFAULT_SCHEDULE
+          p=Path('build/ci-reference/design.mlir')
+          p.write_text(g.generate_mlir(DEFAULT_SCHEDULE))
+          print(p, p.stat().st_size)
+          PY
+          python3 - <<'PY' | tee /tmp/full_layer_compile.txt
+          from pathlib import Path
+          import npu_build
+          mlir=Path('build/ci-reference/design.mlir')
+          xcl=Path('build/ci-reference/design.xclbin')
+          inst=Path('build/ci-reference/design.bin')
+          npu_build.compile_mlir(mlir,xcl,inst)
+          print('xclbin=',xcl, xcl.stat().st_size)
+          print('instructions=',inst, inst.stat().st_size)
+          PY
 
       - name: Derive and validate Qwen3.8-27B generator configuration
         run: |
@@ -133,19 +158,20 @@ jobs:
           print('geometry: PASS')
           PY
           cp /tmp/qwen38_27b_geometry.json /tmp/onebit/qwen38_27b_geometry.json
-          cd /tmp/onebit
-          grep -R -n -i -E 'design_full_layer|full_layer_engine_generate|run_full_layer|lm_head' --include='*.py' --include='*.sh' . | head -1000 | tee /tmp/full_layer_candidates.txt || true
-          test -s /tmp/full_layer_candidates.txt
 
-      - name: Refuse fake 27B artifacts; require a real full-layer generator
+      - name: Record the real 27B generation boundary
         run: |
           set -euxo pipefail
-          cd /tmp/onebit
-          if ! grep -R -q -E 'design_full_layer|full_layer_engine_generate|run_full_layer' --include='*.py' --include='*.sh' .; then
-            echo 'No full-layer generator found in the recovered open history.' >&2
-            exit 2
-          fi
-          echo 'A real 27B layer/lm_head build must use the recovered full-layer path; 9B GEMM XCLBINs are not accepted as substitutes.'
+          cd "$TORCH2AIE/examples/qwen3-decode-layer"
+          {
+            echo '=== current full-layer generator ==='
+            grep -R -n -E 'HIDDEN_DWORDS|TOTAL_WEIGHT_AND_AUX_I32|MAIN_COLUMNS|MAIN_ROWS|DEFAULT_SCHEDULE|Qwen3Q4NXModel' cases/full_layer_engine_generate.py cases/full_layer_engine_reference.py cases/decode_cache_reference.py cases/contract.py 2>/dev/null | head -300
+            echo '=== migration map ==='
+            cat MIGRATION-4to8-GAPMAP.md
+            echo '=== qwen3 runner model binding ==='
+            grep -n -E 'qwen3_8b|DEFAULT_QWEN3_8B|Qwen3Q4NXModel' cases/qwen3_8b_decode_layer_runner.py | head -100
+          } | tee /tmp/27b_generation_boundary.txt
+          echo 'The 27B layer build must be a real geometry/contract port of this generator; no 9B XCLBIN substitution is allowed.'
 
       - name: Upload build and ABI diagnostics
         if: always()
@@ -155,14 +181,15 @@ jobs:
           path: |
             /tmp/toolchain.txt
             /tmp/onebit-history.txt
-            /tmp/qwen35_recipe_lines.txt
-            /tmp/qwen35_recipe.txt
+            /tmp/relevant_history.txt
+            /tmp/generator_refs.txt
+            /tmp/qwen35_urls.txt
             /tmp/qwen35_sizes.txt
-            /tmp/generated_qwen35_xclbins.txt
+            /tmp/qwen35_abi_summary.txt
+            /tmp/full_layer_generator_check.txt
+            /tmp/full_layer_compile.txt
+            /tmp/27b_generation_boundary.txt
             /tmp/flm-qwen35-9b/**
             /tmp/qwen38_27b_geometry.json
-            /tmp/full_layer_candidates.txt
-            /tmp/onebit/qwen38_27b_geometry.json
-            /tmp/onebit/**/*.xclbin
-            /tmp/onebit/**/*.log
+            $TORCH2AIE/examples/qwen3-decode-layer/build/ci-reference/**
           if-no-files-found: ignore
