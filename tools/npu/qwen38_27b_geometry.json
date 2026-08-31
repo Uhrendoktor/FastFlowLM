@@ -1,0 +1,17 @@
+{
+  "model": "qwen3.8:27b",
+  "hidden_size": 5120,
+  "intermediate_size": 17408,
+  "vocab_size": 248320,
+  "num_hidden_layers": 64,
+  "full_attention": {
+    "q_heads": 24,
+    "kv_heads": 4,
+    "head_dim": 256
+  },
+  "linear_attention": {
+    "q_heads": 16,
+    "v_heads": 48,
+    "head_dim": 128
+  }
+}
