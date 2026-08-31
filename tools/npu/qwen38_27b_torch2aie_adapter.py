@@ -23,6 +23,7 @@ def patch(root: Path) -> None:
         'NUM_Q_HEADS = 16': 'NUM_Q_HEADS = 24',
         'NUM_KV_HEADS = 8': 'NUM_KV_HEADS = 4',
         'C6R2_INPUT_DWORDS = 512': 'C6R2_INPUT_DWORDS = HIDDEN_DIM // 2',
+        'SHAPE_CARRIER_DWORDS = 80': 'SHAPE_CARRIER_DWORDS = 60',
         '# === Qwen3-0.6B specific aux sizes ===': '# === Qwen3.8-27B specific aux sizes ===',
     })
     text = p.read_text()
@@ -38,6 +39,7 @@ def patch(root: Path) -> None:
     if (HIDDEN_DIM,INTERMEDIATE_DIM,HEAD_DIM,NUM_Q_HEADS,NUM_KV_HEADS)!=(5120,17408,256,24,4): errors.append('not the Qwen3.8-27B contract')
     if GQA_RATIO!=6: errors.append(f'GQA ratio mismatch: {GQA_RATIO}')
     if C6R2_INPUT_DWORDS!=HIDDEN_DIM//2: errors.append(f'C6R2 input mismatch: {C6R2_INPUT_DWORDS}')
+    if SHAPE_CARRIER_DWORDS!=60: errors.append(f'carrier mismatch: {SHAPE_CARRIER_DWORDS}')
     return errors
 '''
     p.write_text(text)
@@ -51,16 +53,28 @@ def patch(root: Path) -> None:
         'HEAD_DIM = 128': 'HEAD_DIM = 256',
     })
     replace(ex / 'cases/decode_cache_reference.py', {'KV_HEADS = 8': 'KV_HEADS = 4'})
+    replace(ex / 'cases/kv_scan_reference.py', {
+        'OUTPUT_DWORDS = 384': 'OUTPUT_DWORDS = 768',
+        'WINDOW_DWORDS = 512': 'WINDOW_DWORDS = 768',
+    })
+    replace(ex / 'mlir_utils.py', {
+        'if carrier_dwords != 80:': 'if carrier_dwords != 60:',
+        'carrier must be 80 dwords': 'carrier must be 60 dwords',
+        'if output_dwords != 512:': 'if output_dwords != 768:',
+        'attention return window must be 512 dwords': 'attention return window must be 768 dwords',
+    })
 
-    # The historical attention_dataflow already has the four-window contract;
-    # only its payload geometry changes through qkv_compact_reference above.
+    # Keep the historical bank-safe hub BD mapping. Four Q/KV windows use the
+    # first four entries; the down-output stream gets ten fresh high-bank BDs
+    # because the 27B O projection has ten body records.
     c = ex / 'compact_dataflow.py'
     t = c.read_text()
     for a, b in {
         'HUB_Q_OUT_CHANNELS = (1, 2, 3, 4, 1, 2, 3, 4)': 'HUB_Q_OUT_CHANNELS = (1, 2, 3, 4)',
-        'HUB_Q_OUT_BDS = (25, 2, 26, 3, 37, 5, 36, 8)': 'HUB_Q_OUT_BDS = (2, 24, 4, 26)',
+        'HUB_Q_OUT_BDS = (25, 2, 26, 3, 37, 5, 36, 8)': 'HUB_Q_OUT_BDS = (25, 2, 26, 3)',
         'HUB_RETURN_IN_CHANNELS = (2, 3, 4, 5, 2, 3, 4, 5)': 'HUB_RETURN_IN_CHANNELS = (2, 3, 4, 5)',
-        'HUB_RETURN_IN_BDS = (4, 28, 6, 30, 9, 38, 11, 39)': 'HUB_RETURN_IN_BDS = (25, 6, 27, 8)',
+        'HUB_RETURN_IN_BDS = (4, 28, 6, 30, 9, 38, 11, 39)': 'HUB_RETURN_IN_BDS = (4, 28, 6, 30)',
+        'HUB_DOWN_OUT_BDS = (27, 29, 31, 32, 33, 42, 43, 44)': 'HUB_DOWN_OUT_BDS = (44, 45, 46, 47, 48, 49, 50, 51, 52, 53)',
         'HUB_WINDOWS = 8': 'HUB_WINDOWS = 4',
     }.items():
         t = t.replace(a, b)
@@ -69,20 +83,28 @@ def patch(root: Path) -> None:
     g = ex / 'cases/full_layer_engine_generate.py'
     t = g.read_text()
     t = t.replace('WEIGHT_SPAN_CHUNKS = QKV_BODY_WEIGHT_CHUNKS', 'WEIGHT_SPAN_CHUNKS = 384')
-    t = t.replace('"aie.use_lock(%hub_return_full, AcquireGreaterEqual, 8)"', '"aie.use_lock(%hub_return_full, AcquireGreaterEqual, 4)"')
-    t = t.replace('"aie.use_lock(%hub_return_empty, Release, 8)"', '"aie.use_lock(%hub_return_empty, Release, 4)"')
-    t = t.replace('WEIGHT_PATCH_BD_IDS = tuple(range(0, 20, 2))', 'WEIGHT_PATCH_BD_IDS = tuple(range(0, 16, 2))')
-    t = t.replace('WEIGHT_ROW_BD_IDS = tuple(range(1, 20, 2))', 'WEIGHT_ROW_BD_IDS = tuple(range(1, 16, 2))')
-    for old, new in {
-        'carrier must be 80 dwords': 'carrier must be 60 dwords',
-        'if carrier_dwords != 80:': 'if carrier_dwords != 60:',
-        'attention return window must be 512 dwords': 'attention return window must be 768 dwords',
-        'if return_window_dwords != 512:': 'if return_window_dwords != 768:',
-        'SHAPE_CARRIER_DWORDS != 80': 'SHAPE_CARRIER_DWORDS != 60',
-    }.items():
-        t = t.replace(old, new)
-    for old in ('RETURN_WINDOW_DWORDS = 384', 'RETURN_WINDOW_DWORDS = 512', 'ATTENTION_OUTPUT_DWORDS = 384', 'ATTENTION_OUTPUT_DWORDS = 512'):
-        t = t.replace(old, old.split(' = ')[0] + ' = 768')
+    t = t.replace('aie.use_lock(%hub_return_full, AcquireGreaterEqual, 8)', 'aie.use_lock(%hub_return_full, AcquireGreaterEqual, 4)')
+    t = t.replace('aie.use_lock(%hub_return_empty, Release, 8)', 'aie.use_lock(%hub_return_empty, Release, 4)')
+    t = t.replace(
+        'or HUB_Q_OUT_BDS != (25, 2, 26, 3, 37, 5, 36, 8)',
+        'or HUB_Q_OUT_BDS != (25, 2, 26, 3)',
+    )
+    t = t.replace(
+        'or HUB_RETURN_IN_BDS != (4, 28, 6, 30, 9, 38, 11, 39)',
+        'or HUB_RETURN_IN_BDS != (4, 28, 6, 30)',
+    )
+    t = t.replace(
+        'or HUB_DOWN_OUT_BDS != (27, 29, 31, 32, 33, 42, 43, 44)',
+        'or HUB_DOWN_OUT_BDS != (44, 45, 46, 47, 48, 49, 50, 51, 52, 53)',
+    )
+    t = t.replace('or HUB_Q_OUT_CHANNELS != (1, 2, 3, 4, 1, 2, 3, 4)', 'or HUB_Q_OUT_CHANNELS != (1, 2, 3, 4)')
+    t = t.replace('or HUB_RETURN_IN_CHANNELS != (2, 3, 4, 5, 2, 3, 4, 5)', 'or HUB_RETURN_IN_CHANNELS != (2, 3, 4, 5)')
+    t = t.replace('or carrier_dwords != 80', 'or carrier_dwords != 60')
+    t = t.replace('if carrier_dwords != 80:', 'if carrier_dwords != 60:')
+    t = t.replace('if return_window_dwords != 512:', 'if return_window_dwords != 768:')
+    t = t.replace('carrier must be 80 dwords', 'carrier must be 60 dwords')
+    t = t.replace('attention return window must be 512 dwords', 'attention return window must be 768 dwords')
+    t = t.replace('SHAPE_CARRIER_DWORDS != 80', 'SHAPE_CARRIER_DWORDS != 60')
     g.write_text(t)
 
     h = ex / 'qwen3_constants.h'
@@ -105,7 +127,7 @@ def patch(root: Path) -> None:
     }.items():
         t = t.replace(a, b)
     h.write_text(t)
-    print('patched historical full-layer generator + attention/cache fabric for Qwen3.8-27B')
+    print('patched historical full-layer generator + 27B attention/cache fabric')
 
 
 if __name__ == '__main__':
