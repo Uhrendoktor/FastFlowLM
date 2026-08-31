@@ -13,6 +13,13 @@ def replace(path: Path, replacements: dict[str, str]) -> None:
     path.write_text(text)
 
 
+def optional_replace(path: Path, replacements: dict[str, str]) -> None:
+    text = path.read_text()
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    path.write_text(text)
+
+
 def patch(root: Path) -> None:
     ex = root / 'examples/qwen3-decode-layer'
     p = ex / 'contract.py'
@@ -49,15 +56,21 @@ def patch(root: Path) -> None:
         'HEAD_DIM = 128': 'HEAD_DIM = 256',
     })
     replace(ex / 'cases/decode_cache_reference.py', {'KV_HEADS = 8': 'KV_HEADS = 4'})
-    replace(ex / 'cases/kv_scan_reference.py', {
+    optional_replace(ex / 'cases/kv_scan_reference.py', {
         'OUTPUT_DWORDS = 384': 'OUTPUT_DWORDS = 768',
+        'OUTPUT_DWORDS = 512': 'OUTPUT_DWORDS = 768',
+        'WINDOW_DWORDS = 384': 'WINDOW_DWORDS = 768',
         'WINDOW_DWORDS = 512': 'WINDOW_DWORDS = 768',
+        'ATTENTION_OUTPUT_DWORDS = 384': 'ATTENTION_OUTPUT_DWORDS = 768',
+        'ATTENTION_OUTPUT_DWORDS = 512': 'ATTENTION_OUTPUT_DWORDS = 768',
     })
-    replace(ex / 'mlir_utils.py', {
+    optional_replace(ex / 'mlir_utils.py', {
         'if carrier_dwords != 80:': 'if carrier_dwords != 60:',
         'carrier must be 80 dwords': 'carrier must be 60 dwords',
         'if output_dwords != 512:': 'if output_dwords != 768:',
         'attention return window must be 512 dwords': 'attention return window must be 768 dwords',
+        'if output_dwords != 384:': 'if output_dwords != 768:',
+        'attention return window must be 384 dwords': 'attention return window must be 768 dwords',
     })
 
     c = ex / 'compact_dataflow.py'
