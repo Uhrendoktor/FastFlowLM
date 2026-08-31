@@ -32,11 +32,16 @@ jobs:
           test -f scripts/install_toolchain_from_release.sh
           test -f toolchain-release.lock
           bash scripts/install_toolchain_from_release.sh
+          python3 -m pip install --upgrade pip uv
           if [ -f scripts/setup_python.sh ]; then bash scripts/setup_python.sh; fi
-          python3 -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then python3 -m pip install -r requirements.txt; fi
-          python3 -m pip install -e .
+          source "$HOME/torch2aie/.venv/bin/activate"
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
+          python -m pip install -e .
           echo "TORCH2AIE=$HOME/torch2aie" >> "$GITHUB_ENV"
+          echo "VIRTUAL_ENV=$HOME/torch2aie/.venv" >> "$GITHUB_ENV"
+          echo "$HOME/torch2aie/.venv/bin" >> "$GITHUB_PATH"
+          echo "$HOME/torch2aie/toolchain/bin" >> "$GITHUB_PATH"
           {
             echo '=== torch2aie ==='
             git rev-parse HEAD
