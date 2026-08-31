@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-"""Patch ROCm/FLM_Q4NX_Converter for the Qwen3.8-27B Qwen35 layout.
+"""Patch the pinned FLM_Q4NX_Converter for Qwen3.8-27B.
 
-Qwen3.8-27B advertises model_type=qwen3_5.  The upstream converter's
-Qwen35 implementation is dimension-driven and already handles the hybrid
-linear/full-attention tensor maps, but the registry only names 0.8/2/4/9B.
-This script adds a dedicated 27B registry entry without changing the packing
-algorithm.  It is deliberately applied to a pinned converter checkout in CI.
+The converter implementation is dimension-driven.  This patch adds a distinct
+27B model-arch/config entry; no 8B/9B weights or XCLBINs are consumed.
 """
 from __future__ import annotations
 import json
@@ -16,12 +13,23 @@ FFN = 17408
 VOCAB = 248320
 LAYERS = 64
 
+# This is the converter mapping for the Qwen35 tensor layout, kept as an
+# independent 27B config rather than copying a model artifact.
+QWEN35_CONFIG = {
+    "model_arch": "qwen35",
+    "model_type": "qwen3_5",
+    "q4nx": {
+        "weight_dtype": "q4nx",
+        "scale_dtype": "bf16",
+        "zero_dtype": "bf16"
+    }
+}
+
 
 def main(root: str) -> None:
     root = Path(root)
     constants = root / "q4nx" / "constants.py"
     model = root / "q4nx" / "models" / "qwen35.py"
-    config_9b = root / "configs" / "qwen3.5_9b.json"
     config_27b = root / "configs" / "qwen3.5_27b.json"
 
     c = constants.read_text()
@@ -45,14 +53,10 @@ def main(root: str) -> None:
     m = model.read_text()
     if "class Qwen35_27B" not in m:
         m += '\n\nclass Qwen35_27B(Qwen35, model_arch=ModelArch.QWEN35_27B):\n'
-        m += '    print("[INFO] Using Qwen35_27B converter")\n'
         m += '    pass\n'
     model.write_text(m)
 
-    data = json.loads(config_9b.read_text())
-    config_27b.write_text(json.dumps(data, indent=2) + "\n")
-
-    # Hard proof that this patch cannot silently be applied to another model.
+    config_27b.write_text(json.dumps(QWEN35_CONFIG, indent=2) + "\n")
     assert HIDDEN == 5120 and FFN == 17408 and VOCAB == 248320 and LAYERS == 64
     print(f"patched Qwen3.8-27B converter: H={HIDDEN} FFN={FFN} vocab={VOCAB} layers={LAYERS}")
 
