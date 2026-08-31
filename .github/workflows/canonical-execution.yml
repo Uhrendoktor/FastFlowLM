@@ -109,7 +109,10 @@ jobs:
           uv venv /tmp/hf-venv --python /usr/bin/python3.12
           uv pip install --python /tmp/hf-venv/bin/python 'huggingface_hub[cli]'
           /tmp/hf-venv/bin/hf download bartowski/Qwen3.8-27B-GGUF --include 'Qwen3.8-27B-Q4_1.gguf' --local-dir /tmp/qwen38-src
-          /tmp/hf-venv/bin/hf download Qwen/Qwen3.8-27B --include 'config.json' 'tokenizer.json' 'tokenizer_config.json' 'chat_template.jinja' --local-dir /tmp/qwen38-meta
+          /tmp/hf-venv/bin/hf download Qwen/Qwen3.8-27B --include 'config.json' --local-dir /tmp/qwen38-meta
+          /tmp/hf-venv/bin/hf download Qwen/Qwen3.8-27B --include 'tokenizer.json' --local-dir /tmp/qwen38-meta
+          /tmp/hf-venv/bin/hf download Qwen/Qwen3.8-27B --include 'tokenizer_config.json' --local-dir /tmp/qwen38-meta
+          /tmp/hf-venv/bin/hf download Qwen/Qwen3.8-27B --include 'chat_template.jinja' --local-dir /tmp/qwen38-meta
           echo 'Downloaded Qwen3.8-27B source files:'
           find /tmp/qwen38-src -maxdepth 3 -type f -printf '%p %s bytes\n' | sort
           find /tmp/qwen38-meta -maxdepth 2 -type f -printf '%p %s bytes\n' | sort
