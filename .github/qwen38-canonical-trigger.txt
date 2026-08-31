@@ -1,1 +1,2 @@
 Canonical workflow trigger marker. Do not use this file for model configuration.
+Retry: 2026-08-31 after recovering the Q4NX venv bootstrap; use only genuine Qwen3.8-27B artifacts.
