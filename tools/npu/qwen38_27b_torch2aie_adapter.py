@@ -3,12 +3,6 @@
 from pathlib import Path
 import sys
 
-H=5120
-IM=17408
-HD=256
-NQ=24
-NKV=4
-
 
 def replace(path: Path, replacements: dict[str,str]) -> None:
     text=path.read_text()
@@ -48,69 +42,43 @@ def patch(root: Path) -> None:
     p.write_text(text)
 
     replace(ex/'qkv_compact_reference.py', {
-      'WINDOW_DWORDS = 512':'WINDOW_DWORDS = Q_DWORDS // 4',
-      'KV_SIDE_DWORDS = WINDOW_DWORDS * 4':'KV_SIDE_DWORDS = WINDOW_DWORDS * 4',
+      'WINDOW_DWORDS = 512':'WINDOW_DWORDS = ATTENTION_PACKET_DWORDS // 4',
     })
     replace(ex/'cases/attention_block_reference.py', {
       'HEADS_PER_WINDOW = 8':'HEADS_PER_WINDOW = 6',
       'KV_HEADS_PER_WINDOW = 2':'KV_HEADS_PER_WINDOW = 1',
       'HEAD_DIM = 128':'HEAD_DIM = 256',
     })
-    replace(ex/'cases/decode_cache_reference.py', {
-      'KV_HEADS = 8':'KV_HEADS = 4',
-    })
+    replace(ex/'cases/decode_cache_reference.py', {'KV_HEADS = 8':'KV_HEADS = 4'})
     replace(ex/'attention_dataflow.py', {
-      'HUB_Q_OUT_BDS = (2, 24, 4, 26)':'HUB_Q_OUT_BDS = (2, 24, 4, 26)',
-      'HUB_RETURN_IN_BDS = (25, 6, 27, 8)':'HUB_RETURN_IN_BDS = (25, 6, 27, 8)',
       'next_start = f"^q{window + 1}_start" if window + 1 < 4 else "^return0_start"':'next_start = f"^q{window + 1}_start" if window + 1 < len(HUB_Q_OUT_BDS) else "^return0_start"',
       'next_start = f"^return{window + 1}_start" if window + 1 < 4 else "^packet_out_start"':'next_start = f"^return{window + 1}_start" if window + 1 < len(HUB_RETURN_IN_BDS) else "^packet_out_start"',
     })
-    # The hub fabric is four KV windows for Qwen3.8-27B (24 Q heads / 4 KV heads).
     c=ex/'compact_dataflow.py'
     t=c.read_text()
-    t=t.replace('HUB_Q_OUT_CHANNELS = (1, 2, 3, 4, 1, 2, 3, 4)','HUB_Q_OUT_CHANNELS = (1, 2, 3, 4)')
-    t=t.replace('HUB_Q_OUT_BDS = (25, 2, 26, 3, 37, 5, 36, 8)','HUB_Q_OUT_BDS = (25, 2, 26, 3)')
-    t=t.replace('HUB_RETURN_IN_CHANNELS = (2, 3, 4, 5, 2, 3, 4, 5)','HUB_RETURN_IN_CHANNELS = (2, 3, 4, 5)')
-    t=t.replace('HUB_RETURN_IN_BDS = (4, 28, 6, 30, 9, 38, 11, 39)','HUB_RETURN_IN_BDS = (4, 28, 6, 30)')
-    t=t.replace('HUB_DOWN_OUT_BDS = (27, 29, 31, 32, 33, 42, 43, 44)','HUB_DOWN_OUT_BDS = (27, 29, 31, 32, 33, 42, 43, 44, 45, 46)')
-    t=t.replace('HUB_WINDOWS = 8','HUB_WINDOWS = 4')
+    for a,b in {
+      'HUB_Q_OUT_CHANNELS = (1, 2, 3, 4, 1, 2, 3, 4)':'HUB_Q_OUT_CHANNELS = (1, 2, 3, 4)',
+      'HUB_Q_OUT_BDS = (25, 2, 26, 3, 37, 5, 36, 8)':'HUB_Q_OUT_BDS = (25, 2, 26, 3)',
+      'HUB_RETURN_IN_CHANNELS = (2, 3, 4, 5, 2, 3, 4, 5)':'HUB_RETURN_IN_CHANNELS = (2, 3, 4, 5)',
+      'HUB_RETURN_IN_BDS = (4, 28, 6, 30, 9, 38, 11, 39)':'HUB_RETURN_IN_BDS = (4, 28, 6, 30)',
+      'HUB_DOWN_OUT_BDS = (27, 29, 31, 32, 33, 42, 43, 44)':'HUB_DOWN_OUT_BDS = (27, 29, 31, 32, 33, 42, 43, 44, 45, 46)',
+      'HUB_WINDOWS = 8':'HUB_WINDOWS = 4',
+    }.items(): t=t.replace(a,b)
     c.write_text(t)
 
-    # Keep the historical ABI/lock topology, but make its validator consume the
-    # adapted four-window schedule rather than stale 8-head assumptions.
     g=ex/'cases/full_layer_engine_generate.py'
     t=g.read_text()
     t=t.replace('"aie.use_lock(%hub_return_full, AcquireGreaterEqual, 8)"','"aie.use_lock(%hub_return_full, AcquireGreaterEqual, 4)"')
     t=t.replace('"aie.use_lock(%hub_return_empty, Release, 8)"','"aie.use_lock(%hub_return_empty, Release, 4)"')
-    t=t.replace('),\n    )\n    expected_packets = 8', '),\n    )\n    expected_packets = 8')
-    # The structural checker used 5 attention replay markers for the historical
-    # 8-window toy schedule; Qwen3.8-27B has four KV windows.
-    t=t.replace('"qwen3_attention_bf16_make_carrier_masked", mlir.count("qwen3_attention_bf16_make_carrier_masked"), 5','"qwen3_attention_bf16_make_carrier_masked", mlir.count("qwen3_attention_bf16_make_carrier_masked"), 4')
-    t=t.replace('"qwen3_attention_bf16_init_accum", mlir.count("qwen3_attention_bf16_init_accum"), 5','"qwen3_attention_bf16_init_accum", mlir.count("qwen3_attention_bf16_init_accum"), 4')
-    t=t.replace('"qwen3_attention_bf16_accum_block", mlir.count("qwen3_attention_bf16_accum_block"), 5','"qwen3_attention_bf16_accum_block", mlir.count("qwen3_attention_bf16_accum_block"), 4')
-    t=t.replace('"qwen3_attention_bf16_finish_accum", mlir.count("qwen3_attention_bf16_finish_accum"), 5','"qwen3_attention_bf16_finish_accum", mlir.count("qwen3_attention_bf16_finish_accum"), 4')
+    for name in ('make_carrier_masked','init_accum','accum_block','finish_accum'):
+        t=t.replace(f'"qwen3_attention_bf16_{name}", mlir.count("qwen3_attention_bf16_{name}"), 5', f'"qwen3_attention_bf16_{name}", mlir.count("qwen3_attention_bf16_{name}"), 4')
     g.write_text(t)
 
     h=ex/'qwen3_constants.h'
     t=h.read_text()
     for a,b in {
-      'kQBodyRecords = 4':'kQBodyRecords = 12',
-      'kOBodyRecords = 2':'kOBodyRecords = 10',
-      'kUpGateReplays = 12':'kUpGateReplays = 68',
-      'kDownBodyRecords = 2':'kDownBodyRecords = 10',
-      'kQChunksPerRecord = 4':'kQChunksPerRecord = 20',
-      'kKvChunksPerRecord = 4':'kKvChunksPerRecord = 20',
-      'kOChunksPerRecord = 8':'kOChunksPerRecord = 24',
-      'kUpGateChunksPerReplay = 4':'kUpGateChunksPerReplay = 20',
-      'kDownChunksPerRecord = 12':'kDownChunksPerRecord = 68',
-      'kKWeightChunkBase = 16':'kKWeightChunkBase = 240',
-      'kVWeightChunkBase = 24':'kVWeightChunkBase = 280',
-      'kFullLayerOWeightChunkBase = 32':'kFullLayerOWeightChunkBase = 320',
-      'kFullLayerUpGateWeightChunkBase = 48':'kFullLayerUpGateWeightChunkBase = 560',
-      'kFullLayerDownWeightChunkBase = 96':'kFullLayerDownWeightChunkBase = 1920',
-    }.items(): t=t.replace(a,b)
+      'kQBodyRecords = 4':'kQBodyRecords = 12','kOBodyRecords = 2':'kOBodyRecords = 10','kUpGateReplays = 12':'kUpGateReplays = 68','kDownBodyRecords = 2':'kDownBodyRecords = 10','kQChunksPerRecord = 4':'kQChunksPerRecord = 20','kKvChunksPerRecord = 4':'kKvChunksPerRecord = 20','kOChunksPerRecord = 8':'kOChunksPerRecord = 24','kUpGateChunksPerReplay = 4':'kUpGateChunksPerReplay = 20','kDownChunksPerRecord = 12':'kDownChunksPerRecord = 68','kKWeightChunkBase = 16':'kKWeightChunkBase = 240','kVWeightChunkBase = 24':'kVWeightChunkBase = 280','kFullLayerOWeightChunkBase = 32':'kFullLayerOWeightChunkBase = 320','kFullLayerUpGateWeightChunkBase = 48':'kFullLayerUpGateWeightChunkBase = 560','kFullLayerDownWeightChunkBase = 96':'kFullLayerDownWeightChunkBase = 1920'}.items(): t=t.replace(a,b)
     h.write_text(t)
-
     print('patched historical full-layer generator + attention/cache fabric for Qwen3.8-27B')
 
 if __name__=='__main__':
