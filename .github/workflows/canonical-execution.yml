@@ -110,18 +110,25 @@ jobs:
           uv pip install --python /tmp/hf-venv/bin/python 'huggingface_hub[cli]'
           /tmp/hf-venv/bin/hf download bartowski/Qwen3.8-27B-GGUF --include 'Qwen3.8-27B-Q4_1.gguf' --local-dir /tmp/qwen38-src
           /tmp/hf-venv/bin/hf download Qwen/Qwen3.8-27B --include 'config.json' 'tokenizer.json' 'tokenizer_config.json' 'chat_template.jinja' --local-dir /tmp/qwen38-meta
-          test -f /tmp/qwen38-src/Qwen3.8-27B-Q4_1.gguf
+          echo 'Downloaded Qwen3.8-27B source files:'
+          find /tmp/qwen38-src -maxdepth 3 -type f -printf '%p %s bytes\n' | sort
+          find /tmp/qwen38-meta -maxdepth 2 -type f -printf '%p %s bytes\n' | sort
+          SRC=$(find /tmp/qwen38-src -type f -name '*.gguf' ! -iname '*8b*' ! -iname '*9b*' -print -quit)
+          test -n "$SRC"
+          case "$(basename "$SRC")" in *8B*|*9B*) exit 2;; esac
+          printf '%s\n' "$SRC" > /tmp/qwen38-source-path.txt
           test -f /tmp/qwen38-meta/config.json
-          stat -c '%n %s bytes' /tmp/qwen38-src/Qwen3.8-27B-Q4_1.gguf | tee /tmp/qwen38-source-size.txt
+          stat -c '%n %s bytes' "$SRC" | tee /tmp/qwen38-source-size.txt
       - name: Convert genuine 27B Q4NX weights and validate 27B manifest
         run: |
           set -euxo pipefail
           cd /tmp/FLM_Q4NX_Converter
+          SRC=$(cat /tmp/qwen38-source-path.txt)
           /tmp/q4nx-venv/bin/python - <<'PY'
           import json, hashlib, shutil
           from pathlib import Path
           from q4nx import create_converter
-          src='/tmp/qwen38-src/Qwen3.8-27B-Q4_1.gguf'
+          src=Path('/tmp/qwen38-source-path.txt').read_text().strip()
           out=Path('/tmp/Qwen3.8-27B-NPU2'); out.mkdir(parents=True,exist_ok=True)
           converter=create_converter(src, 'qwen3.8-27B')
           converter.convert(q4nx_path=str(out), weights_type='language')
@@ -130,7 +137,7 @@ jobs:
           assert cfg['hidden_size']==5120 and cfg['intermediate_size']==17408 and cfg['vocab_size']==248320 and cfg['num_hidden_layers']==64
           assert cfg['num_attention_heads']==24 and cfg['num_key_value_heads']==4
           sha=hashlib.sha256(Path(src).read_bytes()).hexdigest()
-          manifest={'model':'qwen3.8:27b','source_gguf':'Qwen3.8-27B-Q4_1.gguf','source_sha256':sha,'hidden_size':5120,'intermediate_size':17408,'vocab_size':248320,'num_hidden_layers':64,'num_attention_heads':24,'num_key_value_heads':4,'head_dim':256,'q4nx_file':'model.q4nx','q4nx_bytes':q.stat().st_size}
+          manifest={'model':'qwen3.8:27b','source_gguf':Path(src).name,'source_sha256':sha,'hidden_size':5120,'intermediate_size':17408,'vocab_size':248320,'num_hidden_layers':64,'num_attention_heads':24,'num_key_value_heads':4,'head_dim':256,'q4nx_file':'model.q4nx','q4nx_bytes':q.stat().st_size}
           (out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
           for n in ('config.json','tokenizer.json','tokenizer_config.json','chat_template.jinja'):
               shutil.copy2(Path('/tmp/qwen38-meta')/n,out/n)
@@ -195,6 +202,7 @@ jobs:
             /tmp/qwen38-27b-mlir.txt
             /tmp/qwen38-27b-abi.txt
             /tmp/qwen38-source-size.txt
+            /tmp/qwen38-source-path.txt
             /tmp/Qwen3.8-27B-NPU2/config.json
             /tmp/Qwen3.8-27B-NPU2/manifest.json
             /tmp/Qwen3.8-27B-NPU2/model.q4nx
