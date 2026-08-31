@@ -105,8 +105,7 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p /tmp/qwen38-src /tmp/qwen38-meta
-          python3 -m pip install --user -U 'huggingface_hub[cli]'
-          export PATH="$HOME/.local/bin:$PATH"
+          uv pip install --system 'huggingface_hub[cli]'
           hf download bartowski/Qwen3.8-27B-GGUF --include 'Qwen3.8-27B-Q4_1.gguf' --local-dir /tmp/qwen38-src
           hf download Qwen/Qwen3.8-27B --include 'config.json' 'tokenizer.json' 'tokenizer_config.json' 'chat_template.jinja' --local-dir /tmp/qwen38-meta
           test -f /tmp/qwen38-src/Qwen3.8-27B-Q4_1.gguf
