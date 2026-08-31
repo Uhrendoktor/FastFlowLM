@@ -51,27 +51,21 @@ def patch(root: Path) -> None:
         'HEAD_DIM = 128': 'HEAD_DIM = 256',
     })
     replace(ex / 'cases/decode_cache_reference.py', {'KV_HEADS = 8': 'KV_HEADS = 4'})
-    replace(ex / 'attention_dataflow.py', {
-        'HUB_Q_OUT_BDS = (25, 2, 26, 3, 37, 5, 36, 8)': 'HUB_Q_OUT_BDS = (25, 2, 26, 3)',
-        'HUB_RETURN_IN_BDS = (4, 28, 6, 30, 9, 38, 11, 39)': 'HUB_RETURN_IN_BDS = (4, 28, 6, 30)',
-        'next_start = f"^q{window + 1}_start" if window + 1 < 4 else "^return0_start"': 'next_start = f"^q{window + 1}_start" if window + 1 < len(HUB_Q_OUT_BDS) else "^return0_start"',
-        'next_start = f"^return{window + 1}_start" if window + 1 < 4 else "^packet_out_start"': 'next_start = f"^return{window + 1}_start" if window + 1 < len(HUB_RETURN_IN_BDS) else "^packet_out_start"',
-    })
 
+    # The historical attention_dataflow already has the four-window contract;
+    # only its payload geometry changes through qkv_compact_reference above.
     c = ex / 'compact_dataflow.py'
     t = c.read_text()
     for a, b in {
         'HUB_Q_OUT_CHANNELS = (1, 2, 3, 4, 1, 2, 3, 4)': 'HUB_Q_OUT_CHANNELS = (1, 2, 3, 4)',
-        'HUB_Q_OUT_BDS = (25, 2, 26, 3, 37, 5, 36, 8)': 'HUB_Q_OUT_BDS = (25, 2, 26, 3)',
+        'HUB_Q_OUT_BDS = (25, 2, 26, 3, 37, 5, 36, 8)': 'HUB_Q_OUT_BDS = (2, 24, 4, 26)',
         'HUB_RETURN_IN_CHANNELS = (2, 3, 4, 5, 2, 3, 4, 5)': 'HUB_RETURN_IN_CHANNELS = (2, 3, 4, 5)',
-        'HUB_RETURN_IN_BDS = (4, 28, 6, 30, 9, 38, 11, 39)': 'HUB_RETURN_IN_BDS = (4, 28, 6, 30)',
+        'HUB_RETURN_IN_BDS = (4, 28, 6, 30, 9, 38, 11, 39)': 'HUB_RETURN_IN_BDS = (25, 6, 27, 8)',
         'HUB_WINDOWS = 8': 'HUB_WINDOWS = 4',
     }.items():
         t = t.replace(a, b)
     c.write_text(t)
 
-    # The historical generator counts the function-definition token as well,
-    # so four runtime windows legitimately produce five textual occurrences.
     g = ex / 'cases/full_layer_engine_generate.py'
     t = g.read_text()
     t = t.replace('WEIGHT_SPAN_CHUNKS = QKV_BODY_WEIGHT_CHUNKS', 'WEIGHT_SPAN_CHUNKS = 384')
@@ -87,8 +81,6 @@ def patch(root: Path) -> None:
         'SHAPE_CARRIER_DWORDS != 80': 'SHAPE_CARRIER_DWORDS != 60',
     }.items():
         t = t.replace(old, new)
-    # Recover all historical 128-wide attention return literals that feed the
-    # structural validator; Qwen3.8 full attention is 6x256 per window.
     for old in ('RETURN_WINDOW_DWORDS = 384', 'RETURN_WINDOW_DWORDS = 512', 'ATTENTION_OUTPUT_DWORDS = 384', 'ATTENTION_OUTPUT_DWORDS = 512'):
         t = t.replace(old, old.split(' = ')[0] + ' = 768')
     g.write_text(t)
