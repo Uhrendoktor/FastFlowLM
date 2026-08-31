@@ -74,7 +74,7 @@ jobs:
           cd "$TORCH2AIE"
           python3 "$GITHUB_WORKSPACE/tools/npu/qwen38_27b_torch2aie_adapter.py" "$TORCH2AIE"
           python3 -m py_compile examples/qwen3-decode-layer/contract.py examples/qwen3-decode-layer/projection_schedule.py examples/qwen3-decode-layer/cases/full_layer_engine_generate.py
-          grep -E 'HIDDEN_DIM=5120|INTERMEDIATE_DIM=17408|HEAD_DIM=256|NUM_Q_HEADS=24|NUM_KV_HEADS=4' examples/qwen3-decode-layer/contract.py
+          grep -E 'HIDDEN_DIM[[:space:]]*=[[:space:]]*5120|INTERMEDIATE_DIM[[:space:]]*=[[:space:]]*17408|HEAD_DIM[[:space:]]*=[[:space:]]*256|NUM_Q_HEADS[[:space:]]*=[[:space:]]*24|NUM_KV_HEADS[[:space:]]*=[[:space:]]*4' examples/qwen3-decode-layer/contract.py
 
       - name: Generate and structurally validate genuine 27B fused-layer MLIR
         run: |
@@ -132,13 +132,11 @@ jobs:
           python3 convert.py -i /tmp/qwen38-src/Qwen3.8-27B-Q4_1.gguf -o /tmp/Qwen3.8-27B-NPU2 -f qwen3.8-27B
           test -f /tmp/Qwen3.8-27B-NPU2/model.q4nx
           python3 - <<'PY'
-          import json,os
+          import json
           from pathlib import Path
           root=Path('/tmp/Qwen3.8-27B-NPU2')
           q=root/'model.q4nx'
           assert q.stat().st_size > 10_000_000_000
-          # The converter emits config.json; prove the target dimensions rather
-          # than trusting the source filename.
           cfg=json.loads((root/'config.json').read_text()) if (root/'config.json').exists() else {}
           blob=' '.join(str(x) for x in cfg.values())
           print('q4nx_bytes=',q.stat().st_size)
@@ -151,8 +149,6 @@ jobs:
         run: |
           set -euxo pipefail
           cd "$TORCH2AIE/examples/qwen3-decode-layer"
-          # The historical generator owns the ABI/BD/lock topology.  Build-only
-          # is deliberately invoked after the 27B contract has been installed.
           "$TORCH2AIE/.venv/bin/python" run_full_layer.py --current-token 31 --layer 0 --model-path /tmp/Qwen3.8-27B-NPU2 --build-only
           test -f build/full-layer-engine-capacity-token127/design.xclbin
           cp build/full-layer-engine-capacity-token127/design.xclbin /tmp/layer.xclbin
@@ -161,8 +157,6 @@ jobs:
       - name: Generate genuine 27B LM-head xclbin
         run: |
           set -euxo pipefail
-          # LM-head uses the same pinned Q4NX main16 ABI, but its output width
-          # is the authoritative 248320 vocabulary, never a 9B/8B width.
           python3 tools/npu/qwen38_27b_geometry.py tools/npu/qwen38_27b_geometry.json
           python3 - <<'PY'
           import json
@@ -170,9 +164,6 @@ jobs:
           assert (p['hidden_size'],p['vocab_size'])==(5120,248320)
           print('LM-head dimensions: M=1 K=5120 N=248320')
           PY
-          # Reuse the historical Q4NX main-projection generator only as the
-          # source of the XDNA2 ABI; a dedicated lm_head generator is emitted
-          # by the same toolchain in the next command.
           cd "$TORCH2AIE"
           test -f examples/gemm_asymmetric_tile_buffering/n1_core_i8_v27.py || true
           "$TORCH2AIE/.venv/bin/python" tools/generate_lm_head_27b.py --hidden 5120 --vocab 248320 --q4nx /tmp/Qwen3.8-27B-NPU2/model.q4nx --output /tmp/lm_head.xclbin
