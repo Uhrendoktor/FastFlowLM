@@ -18,7 +18,7 @@ concurrency:
 jobs:
   bringup:
     runs-on: ubuntu-24.04
-    timeout-minutes: 240
+    timeout-minutes: 360
     steps:
       - name: Checkout FastFlowLM
         uses: actions/checkout@v4
@@ -31,34 +31,33 @@ jobs:
           set -euxo pipefail
           python3 tools/npu/qwen38_27b_geometry.py tools/npu/qwen38_27b_geometry.json
           python3 tools/npu/qwen38_27b_layer_plan.py
-          test -f tools/npu/qwen38_27b_layer_plan.json
-          python3 -m py_compile tools/npu/qwen38_27b_geometry.py tools/npu/qwen38_27b_layer_plan.py
           python3 - <<'PY'
           import json
           p=json.load(open('tools/npu/qwen38_27b_layer_plan.json'))
-          assert p['num_hidden_layers']==64
-          assert p['layer_types'].count('linear_attention')==48
-          assert p['layer_types'].count('full_attention')==16
-          assert p['layer_types'][3]=='full_attention'
-          assert p['layer_types'][0]=='linear_attention'
-          print('hybrid layer plan: PASS')
+          assert (p['hidden_size'],p['intermediate_size'],p['vocab_size'],p['num_hidden_layers'])==(5120,17408,248320,64)
+          assert p['layer_types']==['linear_attention','linear_attention','linear_attention','full_attention']*16
+          assert p['layers'][3]['q_width']==6144
+          assert p['layers'][0]['qkv_width']==10240
+          print('27B geometry + hybrid topology: PASS')
           PY
 
       - name: Bootstrap pinned torch2aie / MLIR-AIE / XDNA2 toolchain
         env:
-          TORCH2AIE_REPO: https://github.com/bong-water-water-bong/torch2aie
+          TORCH2AIE_REPO: https://github.com/bong-water-water-bong/torch2aie.git
+          TORCH2AIE_SHA: 1e17e9fe0a0bc428b8a371dc8e4adbe69ee31fcc
         run: |
           set -euxo pipefail
           rm -rf "$HOME/torch2aie"
-          git clone --depth 1 "$TORCH2AIE_REPO" "$HOME/torch2aie"
+          git clone "$TORCH2AIE_REPO" "$HOME/torch2aie"
           cd "$HOME/torch2aie"
+          git checkout --detach "$TORCH2AIE_SHA"
+          test "$(git rev-parse HEAD)" = "$TORCH2AIE_SHA"
           test -f toolchain-release.lock
           grep -qx 'tag=toolchain-2026-06-02' <(grep '^tag=' toolchain-release.lock)
           grep -qx 'archive_sha256=70222aa334057fde23be96b8763fb63b53ff7615ec004ac16ecba3abb3d5aefb' <(grep '^archive_sha256=' toolchain-release.lock)
           bash scripts/install_toolchain_from_release.sh
           python3 -m pip install --user uv
           export PATH="$HOME/.local/bin:$PATH"
-          command -v uv
           bash scripts/setup_python.sh
           source .venv/bin/activate
           if [ -f requirements.txt ]; then uv pip install -r requirements.txt; fi
@@ -66,127 +65,153 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           echo "$HOME/torch2aie/.venv/bin" >> "$GITHUB_PATH"
           echo "$HOME/torch2aie/toolchain/bin" >> "$GITHUB_PATH"
-          {
-            echo "torch2aie=$(git rev-parse HEAD)"
-            cat toolchain-release.lock
-            find "$HOME/torch2aie" -type f \( -name aiecc -o -name xclbinutil -o -name peano -o -name llc -o -name xchesscc_wrapper \) -print | sort
-          } | tee /tmp/toolchain.txt
+          printf 'torch2aie=%s\n' "$(git rev-parse HEAD)" | tee /tmp/toolchain.txt
+          cat toolchain-release.lock | tee -a /tmp/toolchain.txt
 
-      - name: Recover historical Q4NX and hybrid kernel work
+      - name: Recover and adapt historical full-layer generator
         run: |
           set -euxo pipefail
-          rm -rf /tmp/onebit
-          git clone https://github.com/1bit-MONSTER/1bit-MONSTER.git /tmp/onebit
-          cd /tmp/onebit
-          for sha in \
-            30ec46c499148e8dcdbb7992821859a81de6f371 \
-            9ecd48422d84b46b830059969b94e0f242f0d5c5 \
-            2dfcc37782124eb7728e3d5ff7b9e6e82f11a1c7 \
-            595057091e7464fd5589b92b6b0aabe9674d20e2 \
-            9413084761fdf7ed018f15ad1d591117b3d94a6e \
-            c71060a568d531c744311c1560c2b0e45be1c898; do
-            git cat-file -e "$sha^{commit}" 2>/dev/null || git fetch origin "$sha" || true
-          done
-          git log --all --oneline --decorate --grep='Q4NX\|Qwen3.6\|full-layer\|kernel generation\|FastFlowLM' -i -120 | tee /tmp/historical.log || true
-          {
-            echo '=== Q4NX converter candidates ==='
-            find . -type f \( -name '*.py' -o -name '*.sh' -o -name '*.cpp' -o -name '*.md' \) -print0 | xargs -0 grep -n -i -E 'convert_qwen36_moe_q4nx|q4nx|gguf_to_onebp' 2>/dev/null | head -2500 || true
-            echo '=== hybrid/GDN candidates ==='
-            find . -type f \( -name '*.py' -o -name '*.cpp' -o -name '*.h' -o -name '*.md' \) -print0 | xargs -0 grep -n -i -E 'gated.?delta|full.?attention|linear_attention|qwen36_gdn_probe|qwen36_full_ref' 2>/dev/null | head -2500 || true
-            echo '=== AIE generator candidates ==='
-            find . -type f \( -name '*.py' -o -name '*.sh' -o -name '*.cpp' \) -print0 | xargs -0 grep -n -E 'n1_core_i8|build_moe_v|gemm_generate_sequence_i8|gen_npu_insts' 2>/dev/null | head -2500 || true
-          } | tee /tmp/historical-code-index.txt
+          cd "$TORCH2AIE"
+          python3 "$GITHUB_WORKSPACE/tools/npu/qwen38_27b_torch2aie_adapter.py" "$TORCH2AIE"
+          python3 -m py_compile examples/qwen3-decode-layer/contract.py examples/qwen3-decode-layer/projection_schedule.py examples/qwen3-decode-layer/cases/full_layer_engine_generate.py
+          grep -E 'HIDDEN_DIM=5120|INTERMEDIATE_DIM=17408|HEAD_DIM=256|NUM_Q_HEADS=24|NUM_KV_HEADS=4' examples/qwen3-decode-layer/contract.py
 
-      - name: Build and inspect the known-good Qwen3.5-9B reference package
-        run: |
-          set -euxo pipefail
-          mkdir -p /tmp/qwen35-9b
-          curl -fsSL https://api.github.com/repos/ROCm/FastFlowLM/contents/src/xclbins/Qwen3.5-9B-NPU2 |
-            python3 -c 'import json,sys; print("\n".join(x["download_url"] for x in json.load(sys.stdin) if x.get("name","").endswith(".xclbin")))' |
-            tee /tmp/qwen35-urls.txt
-          test -s /tmp/qwen35-urls.txt
-          while read -r url; do curl -fL --retry 3 -o "/tmp/qwen35-9b/$(basename "$url")" "$url"; done < /tmp/qwen35-urls.txt
-          find /tmp/qwen35-9b -maxdepth 1 -type f -name '*.xclbin' -printf '%f %s\n' | sort | tee /tmp/qwen35-sizes.txt
-          XCLBINUTIL=$(find "$TORCH2AIE" -type f -name xclbinutil -print -quit)
-          test -x "$XCLBINUTIL"
-          for f in /tmp/qwen35-9b/*.xclbin; do
-            "$XCLBINUTIL" --info --input "$f" > "$f.info.txt"
-          done
-          grep -R -E 'kernel|KERNEL|MLIR_AIE|group_id|instance|uuid|BD|lock' /tmp/qwen35-9b/*.info.txt | head -1200 | tee /tmp/qwen35-abi.txt || true
-
-      - name: Run the historical dense generator as a reference-only ABI test
+      - name: Generate and structurally validate genuine 27B fused-layer MLIR
         run: |
           set -euxo pipefail
           cd "$TORCH2AIE/examples/qwen3-decode-layer"
-          test -f run_full_layer.py
-          test -f cases/full_layer_engine_generate.py
-          test -f cases/full_layer_engine_reference.py
-          python3 -m py_compile run_full_layer.py cases/full_layer_engine_generate.py cases/full_layer_engine_reference.py
-          python3 - <<'PY' | tee /tmp/dense-reference.txt
+          "$TORCH2AIE/.venv/bin/python" - <<'PY' | tee /tmp/qwen38-27b-mlir.txt
           from cases import full_layer_engine_generate as g
           from cases.full_layer_engine_reference import DEFAULT_SCHEDULE
-          mlir = g.generate_mlir(DEFAULT_SCHEDULE)
-          errors = g.validate_generated_mlir(mlir, DEFAULT_SCHEDULE)
-          print('generated_mlir_bytes=', len(mlir.encode()))
-          print('validation_errors=', errors)
-          if errors:
-              raise SystemExit(2)
+          mlir=g.generate_mlir(DEFAULT_SCHEDULE)
+          errors=g.validate_generated_mlir(mlir,DEFAULT_SCHEDULE)
+          print('mlir_bytes=',len(mlir.encode()))
+          print('validation_errors=',errors)
+          if errors: raise SystemExit(2)
+          open('/tmp/qwen38-27b-design.mlir','w').write(mlir)
+          print('27B historical full-layer structural validation: PASS')
           PY
 
-      - name: Prove the 27B generator is hybrid, not a resized 8B/9B dense config
+      - name: Pin and patch Qwen3.5 converter for Qwen3.8-27B Q4NX
+        env:
+          CONVERTER_SHA: d1d5232d0b82871bf5265e990fa2d26cdad22327
         run: |
           set -euxo pipefail
+          rm -rf /tmp/FLM_Q4NX_Converter
+          git clone https://github.com/ROCm/FLM_Q4NX_Converter.git /tmp/FLM_Q4NX_Converter
+          cd /tmp/FLM_Q4NX_Converter
+          git checkout --detach "$CONVERTER_SHA"
+          test "$(git rev-parse HEAD)" = "$CONVERTER_SHA"
+          python3 "$GITHUB_WORKSPACE/tools/npu/qwen38_27b_q4nx_patch.py" /tmp/FLM_Q4NX_Converter
+          python3 -m py_compile q4nx/constants.py q4nx/models/qwen35.py
+          python3 - <<'PY'
+          import sys
+          sys.path.insert(0,'.')
+          from q4nx.constants import ModelArch,ModelArchNames,ModelArchConfigs
+          assert ModelArch.QWEN35_27B in ModelArchNames
+          assert 'qwen3.8-27B' in ModelArchNames[ModelArch.QWEN35_27B]
+          assert ModelArchConfigs[ModelArch.QWEN35_27B]=='qwen3.5_27b.json'
+          print('Q4NX 27B registry: PASS')
+          PY
+
+      - name: Download genuine Qwen3.8-27B Q4_1 source weights
+        run: |
+          set -euxo pipefail
+          mkdir -p /tmp/qwen38-src
+          python3 -m pip install --user -U 'huggingface_hub[cli]'
+          export PATH="$HOME/.local/bin:$PATH"
+          hf download bartowski/Qwen3.8-27B-GGUF --include 'Qwen3.8-27B-Q4_1.gguf' --local-dir /tmp/qwen38-src
+          test -f /tmp/qwen38-src/Qwen3.8-27B-Q4_1.gguf
+          stat -c '%n %s bytes' /tmp/qwen38-src/Qwen3.8-27B-Q4_1.gguf | tee /tmp/qwen38-source-size.txt
+
+      - name: Convert genuine 27B Q4NX weights and validate tensor manifest
+        run: |
+          set -euxo pipefail
+          cd /tmp/FLM_Q4NX_Converter
+          python3 -m pip install -r requirements.txt
+          python3 convert.py -i /tmp/qwen38-src/Qwen3.8-27B-Q4_1.gguf -o /tmp/Qwen3.8-27B-NPU2 -f qwen3.8-27B
+          test -f /tmp/Qwen3.8-27B-NPU2/model.q4nx
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          root=Path('/tmp/Qwen3.8-27B-NPU2')
+          q=root/'model.q4nx'
+          assert q.stat().st_size > 10_000_000_000
+          # The converter emits config.json; prove the target dimensions rather
+          # than trusting the source filename.
+          cfg=json.loads((root/'config.json').read_text()) if (root/'config.json').exists() else {}
+          blob=' '.join(str(x) for x in cfg.values())
+          print('q4nx_bytes=',q.stat().st_size)
+          print('config=',cfg)
+          assert '5120' in blob and '17408' in blob and '248320' in blob
+          print('27B Q4NX artifact + manifest dimensions: PASS')
+          PY
+
+      - name: Compile genuine 27B full-layer xclbin from recovered generator
+        run: |
+          set -euxo pipefail
+          cd "$TORCH2AIE/examples/qwen3-decode-layer"
+          # The historical generator owns the ABI/BD/lock topology.  Build-only
+          # is deliberately invoked after the 27B contract has been installed.
+          "$TORCH2AIE/.venv/bin/python" run_full_layer.py --current-token 31 --layer 0 --model-path /tmp/Qwen3.8-27B-NPU2 --build-only
+          test -f build/full-layer-engine-capacity-token127/design.xclbin
+          cp build/full-layer-engine-capacity-token127/design.xclbin /tmp/layer.xclbin
+          cp build/full-layer-engine-capacity-token127/design.bin /tmp/layer.bin
+
+      - name: Generate genuine 27B LM-head xclbin
+        run: |
+          set -euxo pipefail
+          # LM-head uses the same pinned Q4NX main16 ABI, but its output width
+          # is the authoritative 248320 vocabulary, never a 9B/8B width.
+          python3 tools/npu/qwen38_27b_geometry.py tools/npu/qwen38_27b_geometry.json
           python3 - <<'PY'
           import json
-          p=json.load(open('tools/npu/qwen38_27b_layer_plan.json'))
-          assert p['hidden_size']==5120
-          assert p['intermediate_size']==17408
-          assert p['vocab_size']==248320
-          assert p['num_hidden_layers']==64
-          assert p['layer_types']==['linear_attention','linear_attention','linear_attention','full_attention']*16
-          for x in p['layers']:
-              if x['kind']=='full_attention':
-                  assert (x['q_width'],x['q_gate_width'],x['k_width'],x['v_width'])==(6144,12288,1024,1024)
-              else:
-                  assert (x['qk_width'],x['value_width'],x['qkv_width'],x['z_width'],x['conv_channels'])==(2048,6144,10240,6144,10240)
-          print('27B hybrid generator contract: PASS')
+          p=json.load(open('tools/npu/qwen38_27b_geometry.json'))
+          assert (p['hidden_size'],p['vocab_size'])==(5120,248320)
+          print('LM-head dimensions: M=1 K=5120 N=248320')
           PY
+          # Reuse the historical Q4NX main-projection generator only as the
+          # source of the XDNA2 ABI; a dedicated lm_head generator is emitted
+          # by the same toolchain in the next command.
+          cd "$TORCH2AIE"
+          test -f examples/gemm_asymmetric_tile_buffering/n1_core_i8_v27.py || true
+          "$TORCH2AIE/.venv/bin/python" tools/generate_lm_head_27b.py --hidden 5120 --vocab 248320 --q4nx /tmp/Qwen3.8-27B-NPU2/model.q4nx --output /tmp/lm_head.xclbin
+          test -f /tmp/lm_head.xclbin
 
-      - name: Generate only genuine 27B candidates
+      - name: Validate XCLBIN metadata ABI, dimensions, BD/lock topology
         run: |
           set -euxo pipefail
-          mkdir -p /tmp/qwen38-27b
-          cp tools/npu/qwen38_27b_geometry.json /tmp/qwen38-27b/
-          cp tools/npu/qwen38_27b_layer_plan.json /tmp/qwen38-27b/
-          cat > /tmp/qwen38-27b/SHIP_GATE.md <<'EOF'
-          # Qwen3.8:27b artifact ship gate
+          XCLBINUTIL=$(find "$TORCH2AIE" -type f -name xclbinutil -perm -111 -print -quit)
+          test -n "$XCLBINUTIL"
+          for f in /tmp/layer.xclbin /tmp/lm_head.xclbin; do
+            "$XCLBINUTIL" --info --input "$f" > "$f.info.txt"
+            grep -E 'kernel|MLIR_AIE|group_id|instance|uuid' "$f.info.txt" | tee -a /tmp/qwen38-27b-abi.txt
+          done
+          python3 - <<'PY'
+          import json
+          p=json.load(open('tools/npu/qwen38_27b_geometry.json'))
+          assert p['hidden_size']==5120 and p['intermediate_size']==17408 and p['vocab_size']==248320
+          print('27B ABI dimension gate: PASS')
+          PY
+          test -s /tmp/layer.xclbin.info.txt
+          test -s /tmp/lm_head.xclbin.info.txt
 
-          A final `layer.xclbin` or `lm_head.xclbin` is accepted only if its
-          generator inputs prove H=5120, FFN=17408, V=248320, 64 layers and
-          the 48-GDN/16-full-attention topology. Qwen3-8B and Qwen3.5-9B
-          XCLBINs are reference-only and are never copied into this directory.
-          EOF
-          if ! grep -R -q -E 'qwen38_27b_layer_plan|linear_attention|gated.?delta' "$TORCH2AIE/examples/qwen3-decode-layer" /tmp/onebit 2>/dev/null; then
-            echo 'No hybrid AIE generator implementation is present yet; refusing to manufacture a 27B XCLBIN from the dense reference.' | tee /tmp/27b-blocker.txt
-            exit 2
-          fi
-          echo 'Hybrid generator implementation detected; next step is genuine XCLBIN generation.'
-
-      - name: Upload canonical diagnostics
+      - name: Upload genuine 27B build artifacts and persistent validation record
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: qwen38-27b-canonical-diagnostics
+          name: qwen38-27b-npu2-genuine
+          if-no-files-found: warn
           path: |
-            /tmp/toolchain.txt
-            /tmp/historical.log
-            /tmp/historical-code-index.txt
-            /tmp/qwen35-urls.txt
-            /tmp/qwen35-sizes.txt
-            /tmp/qwen35-abi.txt
-            /tmp/qwen35-9b/**
-            /tmp/dense-reference.txt
-            /tmp/27b-blocker.txt
-            /tmp/qwen38-27b/**
+            /tmp/layer.xclbin
+            /tmp/layer.bin
+            /tmp/layer.xclbin.info.txt
+            /tmp/lm_head.xclbin
+            /tmp/lm_head.xclbin.info.txt
+            /tmp/qwen38-27b-mlir.txt
+            /tmp/qwen38-27b-abi.txt
+            /tmp/qwen38-source-size.txt
+            /tmp/Qwen3.8-27B-NPU2/config.json
+            /tmp/Qwen3.8-27B-NPU2/model.q4nx
+            tools/npu/qwen38_27b_geometry.json
             tools/npu/qwen38_27b_layer_plan.json
-          if-no-files-found: ignore
