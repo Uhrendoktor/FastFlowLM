@@ -3,40 +3,26 @@
 from pathlib import Path
 import sys
 
-
-def replace(path: Path, replacements: dict[str, str]) -> None:
-    text = path.read_text()
-    for old, new in replacements.items():
-        if old not in text:
-            raise RuntimeError(f'{path}: missing historical token: {old}')
-        text = text.replace(old, new)
+def replace(path: Path, replacements: dict[str,str]) -> None:
+    text=path.read_text()
+    for old,new in replacements.items():
+        if old not in text: raise RuntimeError(f'{path}: missing historical token: {old}')
+        text=text.replace(old,new)
     path.write_text(text)
 
-
-def optional_replace(path: Path, replacements: dict[str, str]) -> None:
-    text = path.read_text()
-    for old, new in replacements.items():
-        text = text.replace(old, new)
+def optional_replace(path: Path, replacements: dict[str,str]) -> None:
+    text=path.read_text()
+    for old,new in replacements.items(): text=text.replace(old,new)
     path.write_text(text)
-
 
 def patch(root: Path) -> None:
-    ex = root / 'examples/qwen3-decode-layer'
-    p = ex / 'contract.py'
-    replace(p, {
-        'HIDDEN_DIM = 1024': 'HIDDEN_DIM = 5120',
-        'INTERMEDIATE_DIM = 3072': 'INTERMEDIATE_DIM = 17408',
-        'HEAD_DIM = 128': 'HEAD_DIM = 256',
-        'NUM_Q_HEADS = 16': 'NUM_Q_HEADS = 24',
-        'NUM_KV_HEADS = 8': 'NUM_KV_HEADS = 4',
-        'C6R2_INPUT_DWORDS = 512': 'C6R2_INPUT_DWORDS = HIDDEN_DIM // 2',
-        '# === Qwen3-0.6B specific aux sizes ===': '# === Qwen3.8-27B specific aux sizes ===',
-    })
-    text = p.read_text()
-    marker = 'def validate_contract() -> list[str]:'
-    if marker not in text:
-        raise RuntimeError('historical validate_contract helper missing')
-    text = text[:text.index(marker)] + '''def validate_contract() -> list[str]:
+    ex=root/'examples/qwen3-decode-layer'
+    p=ex/'contract.py'
+    replace(p,{
+      'HIDDEN_DIM = 1024':'HIDDEN_DIM = 5120','INTERMEDIATE_DIM = 3072':'INTERMEDIATE_DIM = 17408','HEAD_DIM = 128':'HEAD_DIM = 256','NUM_Q_HEADS = 16':'NUM_Q_HEADS = 24','NUM_KV_HEADS = 8':'NUM_KV_HEADS = 4','C6R2_INPUT_DWORDS = 512':'C6R2_INPUT_DWORDS = HIDDEN_DIM // 2','# === Qwen3-0.6B specific aux sizes ===':'# === Qwen3.8-27B specific aux sizes ==='})
+    text=p.read_text(); marker='def validate_contract() -> list[str]:'
+    if marker not in text: raise RuntimeError('historical validate_contract helper missing')
+    text=text[:text.index(marker)]+'''def validate_contract() -> list[str]:
     errors=[]
     expected_blocks=tuple(x//OUTPUT_BLOCK_ROWS for x in PHASE_OUTPUT_DIMS)
     expected_chunks=tuple(x//K_CHUNK for x in PHASE_INPUT_DIMS)
@@ -46,89 +32,26 @@ def patch(root: Path) -> None:
     if GQA_RATIO!=6: errors.append(f'GQA ratio mismatch: {GQA_RATIO}')
     if C6R2_INPUT_DWORDS!=HIDDEN_DIM//2: errors.append(f'C6R2 input mismatch: {C6R2_INPUT_DWORDS}')
     return errors
-'''
-    p.write_text(text)
-
-    replace(ex / 'qkv_compact_reference.py', {'WINDOW_DWORDS = 512': 'WINDOW_DWORDS = ATTENTION_PACKET_DWORDS // 4'})
-    replace(ex / 'cases/attention_block_reference.py', {
-        'HEADS_PER_WINDOW = 8': 'HEADS_PER_WINDOW = 6',
-        'KV_HEADS_PER_WINDOW = 2': 'KV_HEADS_PER_WINDOW = 1',
-        'HEAD_DIM = 128': 'HEAD_DIM = 256',
-    })
-    replace(ex / 'cases/decode_cache_reference.py', {'KV_HEADS = 8': 'KV_HEADS = 4'})
-    optional_replace(ex / 'cases/kv_scan_reference.py', {
-        'OUTPUT_DWORDS = 384': 'OUTPUT_DWORDS = 768',
-        'OUTPUT_DWORDS = 512': 'OUTPUT_DWORDS = 768',
-        'WINDOW_DWORDS = 384': 'WINDOW_DWORDS = 768',
-        'WINDOW_DWORDS = 512': 'WINDOW_DWORDS = 768',
-        'ATTENTION_OUTPUT_DWORDS = 384': 'ATTENTION_OUTPUT_DWORDS = 768',
-        'ATTENTION_OUTPUT_DWORDS = 512': 'ATTENTION_OUTPUT_DWORDS = 768',
-    })
-    optional_replace(ex / 'mlir_utils.py', {
-        'if carrier_dwords != 80:': 'if carrier_dwords != 60:',
-        'carrier must be 80 dwords': 'carrier must be 60 dwords',
-        'if output_dwords != 512:': 'if output_dwords != 768:',
-        'attention return window must be 512 dwords': 'attention return window must be 768 dwords',
-        'if output_dwords != 384:': 'if output_dwords != 768:',
-        'attention return window must be 384 dwords': 'attention return window must be 768 dwords',
-    })
-
-    c = ex / 'compact_dataflow.py'
-    t = c.read_text()
-    for a, b in {
-        'HUB_Q_OUT_CHANNELS = (1, 2, 3, 4, 1, 2, 3, 4)': 'HUB_Q_OUT_CHANNELS = (1, 2, 3, 4)',
-        'HUB_Q_OUT_BDS = (25, 2, 26, 3, 37, 5, 36, 8)': 'HUB_Q_OUT_BDS = (25, 2, 26, 3)',
-        'HUB_RETURN_IN_CHANNELS = (2, 3, 4, 5, 2, 3, 4, 5)': 'HUB_RETURN_IN_CHANNELS = (2, 3, 4, 5)',
-        'HUB_RETURN_IN_BDS = (4, 28, 6, 30, 9, 38, 11, 39)': 'HUB_RETURN_IN_BDS = (4, 28, 6, 30)',
-        'HUB_DOWN_OUT_BDS = (27, 29, 31, 32, 33, 42, 43, 44)': 'HUB_DOWN_OUT_BDS = (44, 45, 46, 47, 48, 49, 50, 51, 52, 53)',
-        'HUB_WINDOWS = 8': 'HUB_WINDOWS = 4',
-    }.items():
-        t = t.replace(a, b)
+'''; p.write_text(text)
+    replace(ex/'qkv_compact_reference.py',{'WINDOW_DWORDS = 512':'WINDOW_DWORDS = ATTENTION_PACKET_DWORDS // 4'})
+    replace(ex/'cases/attention_block_reference.py',{'HEADS_PER_WINDOW = 8':'HEADS_PER_WINDOW = 6','KV_HEADS_PER_WINDOW = 2':'KV_HEADS_PER_WINDOW = 1','HEAD_DIM = 128':'HEAD_DIM = 256'})
+    replace(ex/'cases/decode_cache_reference.py',{'KV_HEADS = 8':'KV_HEADS = 4'})
+    optional_replace(ex/'cases/kv_scan_reference.py',{'OUTPUT_DWORDS = 384':'OUTPUT_DWORDS = 768','OUTPUT_DWORDS = 512':'OUTPUT_DWORDS = 768','WINDOW_DWORDS = 384':'WINDOW_DWORDS = 768','WINDOW_DWORDS = 512':'WINDOW_DWORDS = 768','ATTENTION_OUTPUT_DWORDS = 384':'ATTENTION_OUTPUT_DWORDS = 768','ATTENTION_OUTPUT_DWORDS = 512':'ATTENTION_OUTPUT_DWORDS = 768'})
+    optional_replace(ex/'mlir_utils.py',{'if carrier_dwords != 80:':'if carrier_dwords != 60:','carrier must be 80 dwords':'carrier must be 60 dwords','if output_dwords != 512:':'if output_dwords != 768:','attention return window must be 512 dwords':'attention return window must be 768 dwords','if output_dwords != 384:':'if output_dwords != 768:','attention return window must be 384 dwords':'attention return window must be 768 dwords'})
+    c=ex/'compact_dataflow.py'; t=c.read_text()
+    for a,b in {'HUB_Q_OUT_CHANNELS = (1, 2, 3, 4, 1, 2, 3, 4)':'HUB_Q_OUT_CHANNELS = (1, 2, 3, 4)','HUB_Q_OUT_BDS = (25, 2, 26, 3, 37, 5, 36, 8)':'HUB_Q_OUT_BDS = (25, 2, 26, 3)','HUB_RETURN_IN_CHANNELS = (2, 3, 4, 5, 2, 3, 4, 5)':'HUB_RETURN_IN_CHANNELS = (2, 3, 4, 5)','HUB_RETURN_IN_BDS = (4, 28, 6, 30, 9, 38, 11, 39)':'HUB_RETURN_IN_BDS = (4, 28, 6, 30)','HUB_DOWN_OUT_BDS = (27, 29, 31, 32, 33, 42, 43, 44)':'HUB_DOWN_OUT_BDS = (44, 45, 46, 47, 48, 49, 50, 51, 52, 53)','HUB_WINDOWS = 8':'HUB_WINDOWS = 4'}.items(): t=t.replace(a,b)
     c.write_text(t)
-
-    g = ex / 'cases/full_layer_engine_generate.py'
-    t = g.read_text()
-    t = t.replace('WEIGHT_SPAN_CHUNKS = QKV_BODY_WEIGHT_CHUNKS', 'WEIGHT_SPAN_CHUNKS = 384')
-    t = t.replace('aie.use_lock(%hub_return_full, AcquireGreaterEqual, 8)', 'aie.use_lock(%hub_return_full, AcquireGreaterEqual, 4)')
-    t = t.replace('aie.use_lock(%hub_return_empty, Release, 8)', 'aie.use_lock(%hub_return_empty, Release, 4)')
-    t = t.replace('or HUB_Q_OUT_BDS != (25, 2, 26, 3, 37, 5, 36, 8)', 'or HUB_Q_OUT_BDS != (25, 2, 26, 3)')
-    t = t.replace('or HUB_RETURN_IN_BDS != (4, 28, 6, 30, 9, 38, 11, 39)', 'or HUB_RETURN_IN_BDS != (4, 28, 6, 30)')
-    t = t.replace('or HUB_DOWN_OUT_BDS != (27, 29, 31, 32, 33, 42, 43, 44)', 'or HUB_DOWN_OUT_BDS != (44, 45, 46, 47, 48, 49, 50, 51, 52, 53)')
-    t = t.replace('or HUB_Q_OUT_CHANNELS != (1, 2, 3, 4, 1, 2, 3, 4)', 'or HUB_Q_OUT_CHANNELS != (1, 2, 3, 4)')
-    t = t.replace('or HUB_RETURN_IN_CHANNELS != (2, 3, 4, 5, 2, 3, 4, 5)', 'or HUB_RETURN_IN_CHANNELS != (2, 3, 4, 5)')
-    t = t.replace('or carrier_dwords != 80', 'or carrier_dwords != 60')
-    t = t.replace('if carrier_dwords != 80:', 'if carrier_dwords != 60:')
-    t = t.replace('if return_window_dwords != 512:', 'if return_window_dwords != 768:')
-    t = t.replace('carrier must be 80 dwords', 'carrier must be 60 dwords')
-    t = t.replace('attention return window must be 512 dwords', 'attention return window must be 768 dwords')
-    t = t.replace('SHAPE_CARRIER_DWORDS != 80', 'SHAPE_CARRIER_DWORDS != 60')
-    t = t.replace('            WEIGHT_DWORDS * 8,\n        )', '            ATTENTION_OUTPUT_DWORDS,\n        )')
+    g=ex/'cases/full_layer_engine_generate.py'; t=g.read_text()
+    for a,b in {'WEIGHT_SPAN_CHUNKS = QKV_BODY_WEIGHT_CHUNKS':'WEIGHT_SPAN_CHUNKS = 384','aie.use_lock(%hub_return_full, AcquireGreaterEqual, 8)':'aie.use_lock(%hub_return_full, AcquireGreaterEqual, 4)','aie.use_lock(%hub_return_empty, Release, 8)':'aie.use_lock(%hub_return_empty, Release, 4)','or HUB_Q_OUT_BDS != (25, 2, 26, 3, 37, 5, 36, 8)':'or HUB_Q_OUT_BDS != (25, 2, 26, 3)','or HUB_RETURN_IN_BDS != (4, 28, 6, 30, 9, 38, 11, 39)':'or HUB_RETURN_IN_BDS != (4, 28, 6, 30)','or HUB_DOWN_OUT_BDS != (27, 29, 31, 32, 33, 42, 43, 44)':'or HUB_DOWN_OUT_BDS != (44, 45, 46, 47, 48, 49, 50, 51, 52, 53)','or HUB_Q_OUT_CHANNELS != (1, 2, 3, 4, 1, 2, 3, 4)':'or HUB_Q_OUT_CHANNELS != (1, 2, 3, 4)','or HUB_RETURN_IN_CHANNELS != (2, 3, 4, 5, 2, 3, 4, 5)':'or HUB_RETURN_IN_CHANNELS != (2, 3, 4, 5)','or carrier_dwords != 80':'or carrier_dwords != 60','if carrier_dwords != 80:':'if carrier_dwords != 60:','if return_window_dwords != 512:':'if return_window_dwords != 768:','carrier must be 80 dwords':'carrier must be 60 dwords','attention return window must be 512 dwords':'attention return window must be 768 dwords','SHAPE_CARRIER_DWORDS != 80':'SHAPE_CARRIER_DWORDS != 60'}.items(): t=t.replace(a,b)
     g.write_text(t)
-
-    h = ex / 'qwen3_constants.h'
-    t = h.read_text()
-    for a, b in {
-        'kQBodyRecords = 4': 'kQBodyRecords = 12',
-        'kOBodyRecords = 2': 'kOBodyRecords = 10',
-        'kUpGateReplays = 12': 'kUpGateReplays = 68',
-        'kDownBodyRecords = 2': 'kDownBodyRecords = 10',
-        'kQChunksPerRecord = 4': 'kQChunksPerRecord = 20',
-        'kKvChunksPerRecord = 4': 'kKvChunksPerRecord = 20',
-        'kOChunksPerRecord = 8': 'kOChunksPerRecord = 24',
-        'kUpGateChunksPerReplay = 4': 'kUpGateChunksPerReplay = 20',
-        'kDownChunksPerRecord = 12': 'kDownChunksPerRecord = 68',
-        'kKWeightChunkBase = 16': 'kKWeightChunkBase = 240',
-        'kVWeightChunkBase = 24': 'kVWeightChunkBase = 280',
-        'kFullLayerOWeightChunkBase = 32': 'kFullLayerOWeightChunkBase = 320',
-        'kFullLayerUpGateWeightChunkBase = 48': 'kFullLayerUpGateWeightChunkBase = 560',
-        'kFullLayerDownWeightChunkBase = 96': 'kFullLayerDownWeightChunkBase = 1920',
-    }.items():
-        t = t.replace(a, b)
+    h=ex/'qwen3_constants.h'; t=h.read_text()
+    for a,b in {'kQBodyRecords = 4':'kQBodyRecords = 12','kOBodyRecords = 2':'kOBodyRecords = 10','kUpGateReplays = 12':'kUpGateReplays = 68','kDownBodyRecords = 2':'kDownBodyRecords = 10','kQChunksPerRecord = 4':'kQChunksPerRecord = 20','kKvChunksPerRecord = 4':'kKvChunksPerRecord = 20','kOChunksPerRecord = 8':'kOChunksPerRecord = 24','kUpGateChunksPerReplay = 4':'kUpGateChunksPerReplay = 20','kDownChunksPerRecord = 12':'kDownChunksPerRecord = 68','kKWeightChunkBase = 16':'kKWeightChunkBase = 240','kVWeightChunkBase = 24':'kVWeightChunkBase = 280','kFullLayerOWeightChunkBase = 32':'kFullLayerOWeightChunkBase = 320','kFullLayerUpGateWeightChunkBase = 48':'kFullLayerUpGateWeightChunkBase = 560','kFullLayerDownWeightChunkBase = 96':'kFullLayerDownWeightChunkBase = 1920'}.items(): t=t.replace(a,b)
     h.write_text(t)
+    # build-only must not silently load the historical 0.6B model; the generator is already contracted to genuine 27B.
+    optional_replace(ex/'cases/qwen3_8b_decode_layer_runner.py',{'model = _load_model(model_path, download_model)':'model = None if build_only else _load_model(model_path, download_model)'})
+    optional_replace(ex/'run_full_layer.py',{'model_path = Path(args.model_path)':'model_path = Path(args.model_path)\n    if args.build_only: model_path = Path("/tmp/Qwen3.8-27B-NPU2")'})
     print('patched historical full-layer generator + 27B attention/cache fabric')
 
-
-if __name__ == '__main__':
-    if len(sys.argv) != 2:
-        raise SystemExit('usage: qwen38_27b_torch2aie_adapter.py TORCH2AIE_ROOT')
+if __name__=='__main__':
+    if len(sys.argv)!=2: raise SystemExit('usage: qwen38_27b_torch2aie_adapter.py TORCH2AIE_ROOT')
     patch(Path(sys.argv[1]))
