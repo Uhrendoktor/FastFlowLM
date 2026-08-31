@@ -35,13 +35,23 @@ def main(root: str) -> None:
     constants.write_text(c)
 
     m = model.read_text()
+    # The pinned Qwen35 converter assumes every ssm_alpha/beta tensor unpacks
+    # to (d, m, q). Qwen3.8-27B GGUF carries these as scalar F32 tensors, so
+    # preserve them directly before that legacy reorder path is reached.
+    guard = '''                if len(unpacked) == 1 and ("ssm_alpha.weight" in gguf_tensor.name or "ssm_beta.weight" in gguf_tensor.name):
+                    self.q4nx_tensors[self.forward_name_map[gguf_tensor.name]] = unpacked[0].contiguous()
+                    continue
+\n'''
+    needle = "                unpacked = gguf_tensor.unpack(self.tensor_q4nx_type_map[gguf_tensor.name])\n\n"
+    if guard not in m:
+        assert needle in m, "converter unpack site not found"
+        m = m.replace(needle, needle + guard, 1)
+    if "len(unpacked) == 1 and (\"ssm_alpha.weight\"" not in m:
+        raise AssertionError("Qwen3.8 F32 ssm_alpha/beta guard was not installed")
     if "class Qwen35_27B" not in m:
         m += '\n\nclass Qwen35_27B(Qwen35, model_arch=ModelArch.QWEN35_27B):\n    print("[INFO] Using Qwen35_27B converter")\n    pass\n'
     model.write_text(m)
 
-    # q4nx/__init__.py imports q4nx.models with wildcard; therefore the model
-    # package must explicitly import/export Qwen35_27B for __init_subclass__ to
-    # register it in the factory registry.
     mi = models_init.read_text()
     if "Qwen35_27B" not in mi:
         mi, n = re.subn(
@@ -61,7 +71,7 @@ def main(root: str) -> None:
     config_27b.write_text(json.dumps(data, indent=2) + "\n")
 
     assert HIDDEN == 5120 and FFN == 17408 and VOCAB == 248320 and LAYERS == 64
-    print(f"patched Qwen3.8-27B converter registry: H={HIDDEN} FFN={FFN} vocab={VOCAB} layers={LAYERS}")
+    print(f"patched Qwen3.8-27B converter registry: H={HIDDEN} FFN={FFN} vocab={VOCAB} layers={LAYERS}; F32 ssm alpha/beta guard installed")
 
 
 if __name__ == "__main__":
