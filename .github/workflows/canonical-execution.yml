@@ -56,10 +56,14 @@ jobs:
           grep -qx 'tag=toolchain-2026-06-02' <(grep '^tag=' toolchain-release.lock)
           grep -qx 'archive_sha256=70222aa334057fde23be96b8763fb63b53ff7615ec004ac16ecba3abb3d5aefb' <(grep '^archive_sha256=' toolchain-release.lock)
           bash scripts/install_toolchain_from_release.sh
+          python3 -m pip install --user uv
+          export PATH="$HOME/.local/bin:$PATH"
+          command -v uv
           bash scripts/setup_python.sh
           source .venv/bin/activate
           if [ -f requirements.txt ]; then uv pip install -r requirements.txt; fi
           echo "TORCH2AIE=$HOME/torch2aie" >> "$GITHUB_ENV"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           echo "$HOME/torch2aie/.venv/bin" >> "$GITHUB_PATH"
           echo "$HOME/torch2aie/toolchain/bin" >> "$GITHUB_PATH"
           {
