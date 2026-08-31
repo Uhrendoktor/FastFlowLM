@@ -38,7 +38,6 @@ jobs:
           if [ -f scripts/setup_python.sh ]; then bash scripts/setup_python.sh; fi
           source "$HOME/torch2aie/.venv/bin/activate"
           if [ -f requirements.txt ]; then uv pip install -r requirements.txt; fi
-          uv pip install -e .
           echo "TORCH2AIE=$HOME/torch2aie" >> "$GITHUB_ENV"
           echo "VIRTUAL_ENV=$HOME/torch2aie/.venv" >> "$GITHUB_ENV"
           echo "$HOME/torch2aie/.venv/bin" >> "$GITHUB_PATH"
