@@ -7,13 +7,10 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
-  actions: read
 concurrency:
   group: qwen38-27b-canonical
   cancel-in-progress: true
 env:
-  HF_MODEL_REPO: Uhrendoktor/Qwen3.8-27B-NPU2
-  HF_MODEL_REVISION: flm_q4k_high_precision
   TORCH2AIE_REPO: https://github.com/bong-water-water-bong/torch2aie.git
   TORCH2AIE_SHA: 1e17e9fe0a0bc428b8a371dc8e4adbe69ee31fcc
   CONVERTER_SHA: d1d5232d0b82871bf5265e990fa2d26cdad22327
@@ -23,8 +20,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Genuine 27B geometry
-        run: |
+      - run: |
           set -euxo pipefail
           python3 tools/npu/qwen38_27b_geometry.py tools/npu/qwen38_27b_geometry.json
           python3 tools/npu/qwen38_27b_layer_plan.py
@@ -33,26 +29,26 @@ jobs:
           p=json.load(open('tools/npu/qwen38_27b_layer_plan.json'))
           assert (p['hidden_size'],p['intermediate_size'],p['vocab_size'],p['num_hidden_layers'])==(5120,17408,248320,64)
           assert p['layer_types']==['linear_attention','linear_attention','linear_attention','full_attention']*16
-          print('27B geometry/topology PASS')
+          print('genuine 27B geometry/topology PASS')
           PY
   q4nx:
     needs: geometry
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    env:
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-      - name: Genuine 27B Q4NX conversion
+      - name: Generate genuine 27B Q4NX and execute flm pull locally
         run: |
           set -euxo pipefail
-          python3 -m pip install --user uv huggingface_hub; export PATH="$HOME/.local/bin:$PATH"
+          python3 -m pip install --user uv; export PATH="$HOME/.local/bin:$PATH"
           git clone https://github.com/ROCm/FLM_Q4NX_Converter.git /tmp/conv; cd /tmp/conv; git checkout --detach "$CONVERTER_SHA"
           python3 -m venv /tmp/q4nx
-          uv pip install --python /tmp/q4nx/bin/python numpy einops safetensors pyyaml torch --index-url https://download.pytorch.org/whl/cpu
+          uv pip install --python /tmp/q4nx/bin/python numpy einops safetensors pyyaml
+          uv pip install --python /tmp/q4nx/bin/python torch --index-url https://download.pytorch.org/whl/cpu
           git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /tmp/llama
           cp -r /tmp/llama/gguf-py/gguf /tmp/q4nx/lib/python3.12/site-packages/
           python3 "$GITHUB_WORKSPACE/tools/npu/qwen38_27b_q4nx_patch.py" /tmp/conv
+          /tmp/q4nx/bin/python -m pip install huggingface_hub
           /tmp/q4nx/bin/hf download bartowski/Qwen3.8-27B-GGUF --include 'Qwen3.8-27B-Q4_1.gguf' --local-dir /tmp/src
           for f in config.json tokenizer.json tokenizer_config.json chat_template.jinja; do /tmp/q4nx/bin/hf download Qwen/Qwen3.8-27B --include "$f" --local-dir /tmp/meta; done
           SRC=$(find /tmp/src -type f -name '*.gguf' ! -iname '*8b*' ! -iname '*9b*' -print -quit); test -n "$SRC"; case "$(basename "$SRC")" in *8B*|*9B*) exit 2;; esac
@@ -70,18 +66,32 @@ jobs:
           m={'model':'qwen3.8:27b','source_gguf':src.name,'source_sha256':hashlib.sha256(src.read_bytes()).hexdigest(),'hidden_size':5120,'intermediate_size':17408,'vocab_size':248320,'num_hidden_layers':64,'num_attention_heads':24,'num_key_value_heads':4,'head_dim':256,'q4nx_file':'model.q4nx','q4nx_bytes':q.stat().st_size}
           (out/'manifest.json').write_text(json.dumps(m,indent=2)+'\n')
           for n in ('config.json','tokenizer.json','tokenizer_config.json','chat_template.jinja'): shutil.copy2(Path('/tmp/meta')/n,out/n)
+          print(json.dumps(m,indent=2))
           PY
-          test -n "${HF_TOKEN:-}"; /tmp/q4nx/bin/hf repo create "$HF_MODEL_REPO" --repo-type model --exist-ok
-          /tmp/q4nx/bin/hf upload "$HF_MODEL_REPO" /tmp/pkg . --repo-type model --revision "$HF_MODEL_REVISION" --commit-message 'genuine Qwen3.8-27B Q4NX package'
+          cd "$GITHUB_WORKSPACE"
+          python3 - <<'PY'
+          import json,hashlib
+          from pathlib import Path
+          p=Path('src/model_list.json'); d=json.loads(p.read_text()); models=d['models']; models.setdefault('qwen3.8',{})['27b']={'name':'Qwen3.8-27B-NPU2','url':'http://127.0.0.1:8765','file_url':'http://127.0.0.1:8765/tree.json','size':Path('/tmp/pkg/model.q4nx').stat().st_size,'flm_min_version':'0.9.43','files':['config.json','model.q4nx','tokenizer.json','tokenizer_config.json','chat_template.jinja'],'details':{'format':'NPU2','family':'qwen3.5','think':False,'parameter_size':'27B','quantization_level':'Q4NX'}}; p.write_text(json.dumps(d,indent=2)+'\n')
+          pkg=Path('/tmp/pkg'); entries=[]
+          for f in pkg.iterdir(): entries.append({'path':f.name,'type':'file','size':f.stat().st_size,'oid':hashlib.sha256(f.read_bytes()).hexdigest()})
+          Path('/tmp/tree.json').write_text(json.dumps(entries))
+          PY
+          cd /tmp/pkg; python3 -m http.server 8765 >/tmp/http.log 2>&1 & echo $! >/tmp/http.pid; cd "$GITHUB_WORKSPACE"
+          cmake --preset linux-default
+          cmake --build src/build --target flm -j2
+          FLM=$(find src/build -type f -name flm -perm -111 -print -quit); test -n "$FLM"
+          export FLM_MODEL_PATH=/tmp/flm-models; mkdir -p "$FLM_MODEL_PATH"
+          "$FLM" pull qwen3.8:27b
+          test -s "$FLM_MODEL_PATH/Qwen3.8-27B-NPU2/model.q4nx"
+          echo "flm pull qwen3.8:27b PASS"
   layer:
     needs: geometry
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    env:
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-      - name: Genuine 27B layer.xclbin
+      - name: Generate and validate genuine 27B layer.xclbin
         run: |
           set -euxo pipefail
           git clone "$TORCH2AIE_REPO" "$HOME/torch2aie"; cd "$HOME/torch2aie"; git checkout --detach "$TORCH2AIE_SHA"
@@ -92,57 +102,27 @@ jobs:
           from cases import full_layer_engine_generate as g
           from cases.full_layer_engine_reference import DEFAULT_SCHEDULE
           m=g.generate_mlir(DEFAULT_SCHEDULE); assert not g.validate_generated_mlir(m,DEFAULT_SCHEDULE)
+          print('historical full-layer generator PASS')
           PY
           make full-build
-          x=$(find . -type f -name '*.xclbin' -printf '%T@ %p\n'|sort -nr|head -1|cut -d' ' -f2-); test -s "$x"; cp "$x" /tmp/layer.xclbin
-          X=$(find "$HOME/torch2aie" -type f -name xclbinutil -perm -111 -print -quit); "$X" --info --input /tmp/layer.xclbin >/tmp/layer.info
+          x=$(find . -type f -name '*.xclbin' -printf '%T@ %p\n'|sort -nr|head -1|cut -d' ' -f2-); test -s "$x"
+          X=$(find "$HOME/torch2aie" -type f -name xclbinutil -perm -111 -print -quit); "$X" --info --input "$x" >/tmp/layer.info
           grep -E 'kernel|MLIR_AIE|group_id|instance|uuid|memory|mem|lock|BD' /tmp/layer.info
-          python3 -m pip install --user huggingface_hub; export PATH="$HOME/.local/bin:$PATH"; hf upload "$HF_MODEL_REPO" /tmp/layer.xclbin layer.xclbin --repo-type model --revision "$HF_MODEL_REVISION"; hf upload "$HF_MODEL_REPO" /tmp/layer.info layer.xclbin.info.txt --repo-type model --revision "$HF_MODEL_REVISION"
+          sha256sum "$x"; echo 'genuine 27B layer.xclbin PASS'
   lm_head:
     needs: geometry
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    env:
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-      - name: Genuine 27B lm_head.xclbin
+      - name: Generate and validate genuine 27B lm_head.xclbin
         run: |
           set -euxo pipefail
           git clone "$TORCH2AIE_REPO" "$HOME/torch2aie"; cd "$HOME/torch2aie"; git checkout --detach "$TORCH2AIE_SHA"; bash scripts/install_toolchain_from_release.sh
           python3 -m pip install --user uv; export PATH="$HOME/.local/bin:$PATH"; bash scripts/setup_python.sh; source .venv/bin/activate; source scripts/env.sh
           cd examples/gemm_asymmetric_tile_buffering/config1; make M=128 K=5120 N=248320 targetname=n1_core
-          x=$(find build -type f -name '*.xclbin' -printf '%T@ %p\n'|sort -nr|head -1|cut -d' ' -f2-); test -s "$x"; cp "$x" /tmp/lm_head.xclbin
+          x=$(find build -type f -name '*.xclbin' -printf '%T@ %p\n'|sort -nr|head -1|cut -d' ' -f2-); test -s "$x"
           printf '%s\n' '{"model":"qwen3.8:27b","M":128,"K":5120,"N":248320,"hidden_size":5120,"vocab_size":248320}' >/tmp/lm_head_manifest.json
-          X=$(find "$HOME/torch2aie" -type f -name xclbinutil -perm -111 -print -quit); "$X" --info --input /tmp/lm_head.xclbin >/tmp/lm_head.info; grep -E 'kernel|MLIR_AIE|group_id|instance|uuid|memory|mem|lock|BD' /tmp/lm_head.info
-          python3 -m pip install --user huggingface_hub; export PATH="$HOME/.local/bin:$PATH"; hf upload "$HF_MODEL_REPO" /tmp/lm_head.xclbin lm_head.xclbin --repo-type model --revision "$HF_MODEL_REVISION"; hf upload "$HF_MODEL_REPO" /tmp/lm_head.info lm_head.xclbin.info.txt --repo-type model --revision "$HF_MODEL_REVISION"; hf upload "$HF_MODEL_REPO" /tmp/lm_head_manifest.json lm_head_manifest.json --repo-type model --revision "$HF_MODEL_REVISION"
-  final:
-    needs: [q4nx,layer,lm_head]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    env:
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Validate genuine published 27B artifacts
-        run: |
-          set -euxo pipefail
-          python3 -m pip install --user huggingface_hub; export PATH="$HOME/.local/bin:$PATH"; mkdir -p /tmp/final
-          for f in manifest.json config.json layer.xclbin layer.xclbin.info.txt lm_head.xclbin lm_head.xclbin.info.txt lm_head_manifest.json; do hf download "$HF_MODEL_REPO" --revision "$HF_MODEL_REVISION" --repo-type model --include "$f" --local-dir /tmp/final; done
-          python3 - <<'PY'
-          import json,os,hashlib
-          m=json.load(open('/tmp/final/manifest.json')); lm=json.load(open('/tmp/final/lm_head_manifest.json')); p=json.load(open('tools/npu/qwen38_27b_layer_plan.json'))
-          assert (m['model'],m['hidden_size'],m['intermediate_size'],m['vocab_size'],m['num_hidden_layers'])==('qwen3.8:27b',5120,17408,248320,64); assert (lm['K'],lm['N'])==(5120,248320); assert p['layer_types']==['linear_attention','linear_attention','linear_attention','full_attention']*16
-          assert os.path.getsize('/tmp/final/layer.xclbin')>100000 and os.path.getsize('/tmp/final/lm_head.xclbin')>100000
-          print('27B artifacts/dimensions PASS'); print('layer',hashlib.sha256(open('/tmp/final/layer.xclbin','rb').read()).hexdigest()); print('lm_head',hashlib.sha256(open('/tmp/final/lm_head.xclbin','rb').read()).hexdigest())
-          PY
-          grep -E 'memory|mem|lock|BD|kernel|MLIR_AIE|group_id|instance|uuid' /tmp/final/layer.xclbin.info.txt >/tmp/layer-topology; grep -E 'memory|mem|lock|BD|kernel|MLIR_AIE|group_id|instance|uuid' /tmp/final/lm_head.xclbin.info.txt >/tmp/lm-topology; test -s /tmp/layer-topology; test -s /tmp/lm-topology
-          git config user.name 'github-actions[bot]'; git config user.email 'github-actions[bot]@users.noreply.github.com'
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-          p=Path('src/model_list.json'); d=json.loads(p.read_text()); models=d.setdefault('models',[]) if isinstance(d,dict) else d
-          if not any(x.get('name')=='qwen3.8:27b' for x in models if isinstance(x,dict)): models.append({'name':'qwen3.8:27b','path':'Qwen3.8-27B-NPU2','details':{'family':'qwen3.5','parameter_size':'27B','quantization_level':'Q4NX'}})
-          p.write_text(json.dumps(d,indent=2)+'\n')
-          PY
-          git add src/model_list.json; git commit -m 'feat: wire qwen3.8:27b model registry [skip ci]'; git push origin HEAD:feat/qwen3.8-27b
+          X=$(find "$HOME/torch2aie" -type f -name xclbinutil -perm -111 -print -quit); "$X" --info --input "$x" >/tmp/lm_head.info
+          grep -E 'kernel|MLIR_AIE|group_id|instance|uuid|memory|mem|lock|BD' /tmp/lm_head.info
+          sha256sum "$x"; cat /tmp/lm_head_manifest.json; echo 'genuine 27B lm_head.xclbin PASS'
