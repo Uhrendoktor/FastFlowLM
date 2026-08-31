@@ -93,7 +93,7 @@ jobs:
           git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /tmp/llama.cpp
           cp -r /tmp/llama.cpp/gguf-py/gguf /tmp/q4nx-venv/lib/python3.12/site-packages/
           python3 "$GITHUB_WORKSPACE/tools/npu/qwen38_27b_q4nx_patch.py" /tmp/FLM_Q4NX_Converter
-          /tmp/q4nx-venv/bin/python -m py_compile q4nx/constants.py q4nx/models/qwen35.py
+          /tmp/q4nx-venv/bin/python -m py_compile q4nx/constants.py q4nx/models/qwen35.py q4nx/models/__init__.py
           /tmp/q4nx-venv/bin/python - <<'PY'
           import sys; sys.path.insert(0,'.')
           from q4nx.constants import ModelArch,ModelArchNames,ModelArchConfigs
@@ -105,9 +105,11 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p /tmp/qwen38-src /tmp/qwen38-meta
-          uv pip install --system 'huggingface_hub[cli]'
-          hf download bartowski/Qwen3.8-27B-GGUF --include 'Qwen3.8-27B-Q4_1.gguf' --local-dir /tmp/qwen38-src
-          hf download Qwen/Qwen3.8-27B --include 'config.json' 'tokenizer.json' 'tokenizer_config.json' 'chat_template.jinja' --local-dir /tmp/qwen38-meta
+          rm -rf /tmp/hf-venv
+          uv venv /tmp/hf-venv --python /usr/bin/python3.12
+          uv pip install --python /tmp/hf-venv/bin/python 'huggingface_hub[cli]'
+          /tmp/hf-venv/bin/hf download bartowski/Qwen3.8-27B-GGUF --include 'Qwen3.8-27B-Q4_1.gguf' --local-dir /tmp/qwen38-src
+          /tmp/hf-venv/bin/hf download Qwen/Qwen3.8-27B --include 'config.json' 'tokenizer.json' 'tokenizer_config.json' 'chat_template.jinja' --local-dir /tmp/qwen38-meta
           test -f /tmp/qwen38-src/Qwen3.8-27B-Q4_1.gguf
           test -f /tmp/qwen38-meta/config.json
           stat -c '%n %s bytes' /tmp/qwen38-src/Qwen3.8-27B-Q4_1.gguf | tee /tmp/qwen38-source-size.txt
