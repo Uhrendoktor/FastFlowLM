@@ -89,7 +89,8 @@ jobs:
           git checkout --detach "$CONVERTER_SHA"
           test "$(git rev-parse HEAD)" = "$CONVERTER_SHA"
           python3 -m venv /tmp/q4nx-venv
-          uv pip install --python /tmp/q4nx-venv/bin/python numpy torch einops safetensors pyyaml
+          uv pip install --python /tmp/q4nx-venv/bin/python numpy einops safetensors pyyaml
+          uv pip install --python /tmp/q4nx-venv/bin/python torch --index-url https://download.pytorch.org/whl/cpu
           git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /tmp/llama.cpp
           cp -r /tmp/llama.cpp/gguf-py/gguf /tmp/q4nx-venv/lib/python3.12/site-packages/
           python3 "$GITHUB_WORKSPACE/tools/npu/qwen38_27b_q4nx_patch.py" /tmp/FLM_Q4NX_Converter
