@@ -9,7 +9,7 @@ def configure_peano_makefile(cfg:Path,peano:Path)->None:
     s=s.replace('use_chess?=1','use_chess?=0')
     s=s.replace('ifneq (${use_chess}, 1)\n$(error gemm_asymmetric_tile_buffering in torch2aie is Chess-only; use use_chess=1)\nendif\n','')
     start='KERNEL_CC=xchesscc_wrapper\nKERNEL_CFLAGS=aie2p -I ${AIETOOLS_DIR}/include -I ${MLIR_AIE_DIR}/include'
-    repl=f'KERNEL_CC={peano}/bin/clang++\nKERNEL_CFLAGS=--target=aie2p -O2 -std=c++20 -DNDEBUG -Wno-parentheses -Wno-attributes -Wno-macro-redefined -I ${{AIETOOLS_DIR}}/include -I ${{MLIR_AIE_DIR}}/include'
+    repl=f'KERNEL_CC={peano}/bin/clang++\nKERNEL_CFLAGS=-arch=aie2p -O2 -std=c++20 -DNDEBUG -Wno-parentheses -Wno-attributes -Wno-macro-redefined -I ${{AIETOOLS_DIR}}/include -I ${{MLIR_AIE_DIR}}/include'
     if start not in s: raise SystemExit('gemm makefile kernel compiler anchor missing')
     s=s.replace(start,repl,1).replace('aiecc_chess_flags=--unified',f'aiecc_chess_flags=--no-xchesscc --no-xbridge --peano {peano}',1)
     p.write_text(s)
