@@ -1,33 +1,47 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import argparse, os, re, shutil, subprocess
+import argparse, hashlib, os, shutil, subprocess, sys, urllib.request
 from pathlib import Path
-K=5120; N=248320; M=128
 
-def peano(root:Path)->Path:
-    for p in root.rglob('clang++'):
-        if p.is_file() and p.parent.name=='bin' and os.access(p,os.X_OK):
-            try: v=subprocess.check_output([str(p),'--version'],text=True,stderr=subprocess.STDOUT,timeout=10)
-            except Exception: continue
-            if any(x in v for x in ('Peano','AI Engine','AIE')): return p.parent.parent
-    raise SystemExit('no Peano clang++ found in pinned toolchain')
+K=5120; N=248320; M=128
+PEANO_WHEEL_URL = "https://github.com/Xilinx/llvm-aie/releases/download/nightly/llvm_aie-21.0.0.2026061701%2B742b6c9b-py3-none-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
+PEANO_WHEEL_SHA256 = "01da9bf7fd6d6fc86a77f85c5841fc3d74508eae118f6c0e5007ae48bacc748a"
+
+def ensure_peano(root: Path) -> Path:
+    configured=os.environ.get('PEANO_INSTALL_DIR')
+    if configured and (Path(configured)/'bin'/'clang++').is_file():
+        return Path(configured)
+    cache=Path.home()/'.cache'/'qwen38-peano'; cache.mkdir(parents=True,exist_ok=True)
+    wheel=cache/Path(PEANO_WHEEL_URL.split('/')[-1]).name.replace('%2B','+')
+    if not wheel.is_file() or hashlib.sha256(wheel.read_bytes()).hexdigest()!=PEANO_WHEEL_SHA256:
+        urllib.request.urlretrieve(PEANO_WHEEL_URL,wheel)
+        got=hashlib.sha256(wheel.read_bytes()).hexdigest()
+        if got!=PEANO_WHEEL_SHA256: raise SystemExit(f'Peano wheel SHA256 mismatch: {got}')
+    subprocess.run([sys.executable,'-m','pip','install','--no-deps',str(wheel)],check=True)
+    show=subprocess.check_output([sys.executable,'-m','pip','show','llvm-aie'],text=True)
+    location=next((x.split(':',1)[1].strip() for x in show.splitlines() if x.startswith('Location:')),None)
+    if not location: raise SystemExit('llvm-aie installed but location is unknown')
+    pd=Path(location)/'llvm-aie'
+    if not (pd/'bin'/'clang++').is_file(): raise SystemExit(f'Peano clang++ missing: {pd}')
+    os.environ['PEANO_INSTALL_DIR']=str(pd); return pd
 
 def patch(p:Path, pd:Path)->None:
     s=p.read_text().replace('use_chess?=1','use_chess?=0')
     s=s.replace('ifneq (${use_chess}, 1)\n$(error gemm_asymmetric_tile_buffering in torch2aie is Chess-only; use use_chess=1)\nendif\n','')
-    s=s.replace('KERNEL_CC=xchesscc_wrapper\nKERNEL_CFLAGS=aie2p -I ${AIETOOLS_DIR}/include -I ${MLIR_AIE_DIR}/include',f'KERNEL_CC={pd}/bin/clang++\nKERNEL_CFLAGS=-O2 -std=c++20 --target=aie2p-none-unknown-elf -Wno-parentheses -Wno-attributes -Wno-macro-redefined -I ${{AIETOOLS_DIR}}/include -I ${{MLIR_AIE_DIR}}/include')
-    s=s.replace('aiecc_chess_flags=--unified','aiecc_chess_flags=--no-xchesscc --no-xbridge --peano '+str(pd))
+    s=s.replace('KERNEL_CC=xchesscc_wrapper\nKERNEL_CFLAGS=aie2p -I ${AIETOOLS_DIR}/include -I ${MLIR_AIE_DIR}/include',f'KERNEL_CC={pd}/bin/clang++\nKERNEL_CFLAGS=-O2 -std=c++20 --target=aie2p-none-unknown-elf -DNDEBUG -Wno-parentheses -Wno-attributes -Wno-macro-redefined -I ${{AIETOOLS_DIR}}/include -I ${{MLIR_AIE_DIR}}/include')
+    s=s.replace('aiecc_chess_flags=--unified',f'aiecc_chess_flags=--no-xchesscc --no-xbridge --peano {pd}')
     p.write_text(s)
 
 def main(root:Path)->int:
-    root=root.resolve(); ex=root/'examples/gemm_asymmetric_tile_buffering'; patch(ex/'makefile_common',peano(root)); cfg=ex/'config1'
+    root=root.resolve(); pd=ensure_peano(root); ex=root/'examples/gemm_asymmetric_tile_buffering'; patch(ex/'makefile_common',pd); cfg=ex/'config1'
     subprocess.run(['make','clean'],cwd=cfg,check=False)
-    subprocess.run(['make',f'M={M}',f'K={K}',f'N={N}','targetname=n1_core_bf16'],cwd=cfg,check=True,env=os.environ|{'QWEN38_LM_HEAD_K':str(K),'QWEN38_LM_HEAD_N':str(N),'QWEN38_LM_HEAD_M':str(M)})
+    env=os.environ.copy(); env.update({'QWEN38_LM_HEAD_K':str(K),'QWEN38_LM_HEAD_N':str(N),'QWEN38_LM_HEAD_M':str(M)})
+    subprocess.run(['make',f'M={M}',f'K={K}',f'N={N}','targetname=n1_core_bf16'],cwd=cfg,check=True,env=env)
     xs=sorted(cfg.glob('build/*.xclbin'),key=lambda p:p.stat().st_mtime,reverse=True); ms=sorted(cfg.glob('build/*.mlir'),key=lambda p:p.stat().st_mtime,reverse=True)
     if not xs: raise SystemExit('no lm_head xclbin')
     x=xs[0]; m=ms[0] if ms else None
     if m:
-        t=m.read_text();
+        t=m.read_text()
         if str(K) not in t or str(N) not in t: raise SystemExit('MLIR does not contain K=5120 and N=248320')
         if 'MLIR_AIE' not in t: raise SystemExit('MLIR missing MLIR_AIE kernel')
     out=Path(os.environ.get('QWEN38_LM_HEAD_OUT',root/'lm_head.xclbin')); out.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(x,out)
