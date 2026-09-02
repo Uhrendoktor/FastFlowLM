@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+import hashlib
 import os
+import subprocess
+import sys
+import urllib.request
 from pathlib import Path
+
+PEANO_WHEEL_URL = "https://github.com/Xilinx/llvm-aie/releases/download/nightly/llvm_aie-21.0.0.2026061701%2B742b6c9b-py3-none-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
+PEANO_WHEEL_SHA256 = "01da9bf7fd6d6fc86a77f85c5841fc3d74508eae118f6c0e5007ae48bacc748a"
 
 
 def replace_once(path: Path, old: str, new: str) -> bool:
@@ -12,6 +19,34 @@ def replace_once(path: Path, old: str, new: str) -> bool:
         raise SystemExit(f'anchor missing in {path}: {old[:120]!r}')
     path.write_text(text.replace(old, new, 1))
     return True
+
+
+def ensure_peano() -> Path:
+    configured = os.environ.get("PEANO_INSTALL_DIR")
+    if configured:
+        clang = Path(configured) / "bin" / "clang++"
+        if clang.is_file() and os.access(clang, os.X_OK):
+            return Path(configured)
+    cache = Path.home() / ".cache" / "qwen38-peano"
+    cache.mkdir(parents=True, exist_ok=True)
+    wheel = cache / Path(PEANO_WHEEL_URL.split("/")[-1]).name.replace("%2B", "+")
+    if not wheel.is_file() or hashlib.sha256(wheel.read_bytes()).hexdigest() != PEANO_WHEEL_SHA256:
+        print("Downloading pinned open-source Peano compiler", flush=True)
+        urllib.request.urlretrieve(PEANO_WHEEL_URL, wheel)
+        got = hashlib.sha256(wheel.read_bytes()).hexdigest()
+        if got != PEANO_WHEEL_SHA256:
+            raise SystemExit(f"Peano wheel SHA256 mismatch: {got} != {PEANO_WHEEL_SHA256}")
+    subprocess.run([sys.executable, "-m", "pip", "install", "--no-deps", str(wheel)], check=True)
+    show = subprocess.check_output([sys.executable, "-m", "pip", "show", "llvm-aie"], text=True)
+    location = next((line.split(":", 1)[1].strip() for line in show.splitlines() if line.startswith("Location:")), None)
+    if not location:
+        raise SystemExit("llvm-aie installed but pip did not report its location")
+    root = Path(location) / "llvm-aie"
+    clang = root / "bin" / "clang++"
+    if not clang.is_file():
+        raise SystemExit(f"installed llvm-aie has no Peano clang++ at {clang}")
+    os.environ["PEANO_INSTALL_DIR"] = str(root)
+    return root
 
 
 def patch_runner(runner: Path) -> bool:
@@ -36,8 +71,6 @@ def patch_npu_build(nb: Path) -> bool:
         raise SystemExit('cannot locate _compile_aie_object')
     helper = '''def _compile_aie_object(source_names: tuple[str, ...], object_name: str) -> None:\n    if not source_names:\n        raise ValueError(f"missing source for role object: {object_name}")\n    src = EXPERIMENT_DIR / source_names[0]\n    obj = _role_object_path(object_name)\n    obj.parent.mkdir(parents=True, exist_ok=True)\n    if os.environ.get("QWEN38_USE_PEANO") == "1":\n        peano = Path(os.environ["PEANO_INSTALL_DIR"])\n        compiler = peano / "bin" / "clang++"\n        cmd = [str(compiler), "-O2", "-std=c++20", "--target=aie2p-none-unknown-elf",\n               "-Wno-parentheses", "-Wno-attributes", "-Wno-macro-redefined", "-DNDEBUG",\n               f"-I{EXPERIMENT_DIR}", f"-I{AIETOOLS_DIR / 'include'}",\n               f"-I{MLIR_AIE_DIR / 'include'}", f"-I{MLIR_AIE_DIR / 'include/aie_kernels'}",\n               f"-I{MLIR_AIE_DIR / 'include/aie_kernels/aie2p'}", "-c", str(src), "-o", str(obj)]\n        print(f"  Compiling {object_name} with Peano from {src.name}...")\n    else:\n        compiler = TOOLCHAIN_DIR / "bin" / "xchesscc_wrapper"\n        cmd = [str(compiler), "aie2p", f"-I{EXPERIMENT_DIR}", f"-I{AIETOOLS_DIR / 'include'}",\n               f"-I{MLIR_AIE_DIR / 'include'}", f"-I{MLIR_AIE_DIR / 'include/aie_kernels'}",\n               f"-I{MLIR_AIE_DIR / 'include/aie_kernels/aie2p'}", "-c", str(src), "-o", str(obj)]\n        print(f"  Compiling {object_name} with Chess from {src.name}...")\n    run_command(cmd)\n'''
     s = s[:start] + helper + s[end:]
-    if 'QWEN38_USE_PEANO' not in s:
-        raise SystemExit('Peano helper insertion failed')
     anchor = '''    cmd = [\n        str(aiecc),\n        "-v",\n        f"-j{AIECC_JOBS}",\n        f"--aietools={AIETOOLS_DIR}",\n        "--no-compile-host",\n'''
     if anchor not in s:
         raise SystemExit('aiecc command anchor not found')
@@ -50,6 +83,8 @@ def patch_npu_build(nb: Path) -> bool:
 
 def main(root: Path) -> int:
     root = root.resolve()
+    peano_root = ensure_peano()
+    os.environ["PEANO_INSTALL_DIR"] = str(peano_root)
     ex = root / 'examples/qwen3-decode-layer'
     gen = ex / 'cases/full_layer_engine_generate.py'
     runner = ex / 'cases/qwen3_8b_decode_layer_runner.py'
