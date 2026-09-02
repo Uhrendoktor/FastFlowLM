@@ -7,8 +7,10 @@ PEANO_WHEEL_SHA256="01da9bf7fd6d6fc86a77f85c5841fc3d74508eae118f6c0e5007ae48bacc
 
 def replace_once(path:Path,old:str,new:str)->bool:
     text=path.read_text()
-    if new in text:return False
-    if old not in text: raise SystemExit(f'anchor missing in {path}: {old[:120]!r}')
+    if new in text:
+        return False
+    if old not in text:
+        raise SystemExit(f"anchor missing in {path}: {old[:120]!r}; required replacement {new[:120]!r} is also absent")
     path.write_text(text.replace(old,new,1)); return True
 
 def ensure_peano()->Path:
@@ -41,7 +43,9 @@ def patch_npu_build(nb:Path)->None:
     s=s[:start]+helper+s[end:]
     anchor='''    cmd = [\n        str(aiecc),\n        "-v",\n        f"-j{AIECC_JOBS}",\n        f"--aietools={AIETOOLS_DIR}",\n        "--no-compile-host",\n'''
     if anchor not in s: raise SystemExit('aiecc command anchor not found')
-    s=s.replace(anchor,anchor+'''        *(["--no-xchesscc","--no-xbridge","--peano",os.environ["PEANO_INSTALL_DIR"]] if os.environ.get("QWEN38_USE_PEANO") == "1" else []),\n''',1); nb.write_text(s)
+    if '--no-xchesscc' not in s:
+        s=s.replace(anchor,anchor+'''        *(["--no-xchesscc","--no-xbridge","--peano",os.environ["PEANO_INSTALL_DIR"]] if os.environ.get("QWEN38_USE_PEANO") == "1" else []),\n''',1)
+    nb.write_text(s)
 
 def main(root:Path)->int:
     root=root.resolve(); pd=ensure_peano(); os.environ['PEANO_INSTALL_DIR']=str(pd); ex=root/'examples/qwen3-decode-layer'; gen=ex/'cases/full_layer_engine_generate.py'; runner=ex/'cases/qwen3_8b_decode_layer_runner.py'; nb=ex/'npu_build.py'; changes=[]
