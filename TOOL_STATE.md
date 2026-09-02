@@ -1,7 +1,7 @@
 # Qwen3.8-27B NPU bring-up state
 
 - Branch: `feat/qwen3.8-27b`
-- Current head: `0e518c952a96b4e856a75885b561e3df22d34f29`
+- Current head: `6cb76c9a71a8959e31ecf4a9f56b7414dc541812`
 - Target is genuine Qwen3.8-27B only: H=5120, FFN=17408, vocab=248320, 64 layers, 24 attention heads, 4 KV heads, head_dim=256.
 - Hybrid topology is exactly `[linear_attention, linear_attention, linear_attention, full_attention] * 16`.
 - Historical 8B/9B XCLBINs are reference-only and are never accepted as 27B substitutes.
@@ -13,32 +13,30 @@
 
 ## Historical generator findings
 
-The previous runs exposed stale small-model assumptions in the historical full-layer generator. The 27B adaptation requires the genuine GQA geometry (24 Q heads, 4 KV heads, head_dim 256), four 6Q/1KV windows, Q width 6144, O width 5120, up/gate 17408, down 5120, 384-dword weight chunks, a 768-dword attention return packet, and the 27B lock/BD topology. The adapter already corrected the attention-output validator and related stale lock/topology assumptions.
+The historical full-layer generator contains stale small-model assumptions. The 27B adaptation uses genuine GQA geometry (24 Q heads, 4 KV heads, head_dim 256), Q width 6144, O width 5120, up/gate 17408, down 5120, 384-dword weight chunks, a 768-dword attention return packet, and the 27B lock/BD topology. The adapter also corrects stale attention-output and source replay lock assumptions.
+
+## Runtime ABI findings
+
+FastFlowLM's NPU application manager creates an `MLIR_AIE` kernel interface and invokes the runtime kernel with the three scalar control arguments followed by BO arguments. The lm-head generator is therefore required to produce the MLIR-AIE GEMM ABI rather than an arbitrary dimension-matched GEMM. The existing Qwen3.5-9B lm-head XCLBIN is used only as an ABI-family reference; it is never copied, renamed, or packaged as 27B.
 
 ## Previous execution findings
 
-- Canonical run `33414548588` geometry passed.
-- Q4NX job was cancelled while conversion was still running.
-- `lm_head` failed before generation because `xchesscc_wrapper` requires an unavailable AIEBuild license on the hosted Ubuntu runner.
-- `layer` reached the same AIEBuild/xchesscc license failure after the historical structural validation stage.
-- The exact failure was: `AIEBuild license not found` from `xchesscc`.
-- The pinned toolchain contains the Chess path but the hosted runner does not provide a proprietary AIEBuild license. A Peano path was therefore added to the canonical build flow; it is used only if the pinned archive actually contains an identifiable Peano clang++.
+- Canonical run `33414548588`: geometry passed; Q4NX was cancelled during conversion; layer and lm_head failed on the proprietary `xchesscc`/AIEBuild license path.
+- Canonical run `33625669477` (run 81, commit `a7ed8a5f30b059fb7fc40ddd950e84a78a345bc4`) failed immediately in geometry because the layer plan did not expose `num_attention_heads`, `num_key_value_heads`, and `head_dim` at the top level.
+- Fixed that geometry contract in `21c8df31e50be364f877551d3ece23c8bef67899`.
+- Canonical run `33625763903` then passed geometry but failed the three build jobs. lm_head failed because the venv created by pinned torch2aie has no `pip`; layer had the same hosted-toolchain/Peano bootstrap constraint, and Q4NX failed during its conversion/validation job. The lm-head log specifically showed `/home/runner/torch2aie/.venv/bin/python3: No module named pip`.
+- The build scripts were changed to install a pinned open-source `llvm-aie`/Peano wheel through `uv`, not through the unavailable venv `pip`.
+- Supplemental Peano wheel pinned for hosted execution: `llvm_aie-21.0.0.2026061701+742b6c9b-py3-none-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl`, SHA256 `01da9bf7fd6d6fc86a77f85c5841fc3d74508eae118f6c0e5007ae48bacc748a`. This does not replace the pinned torch2aie/toolchain archive; it supplies the open-source AIE core compiler absent from the hosted runner.
 
-## Changes made after the failed run
+## Current execution
 
-- Added `tools/npu/qwen38_27b_build_patch_v3.py` to patch the pinned torch2aie layer runner/generator and select Peano for AIE object/MLIR compilation.
-- Added `tools/npu/qwen38_27b_lm_head_build_v2.py` to generate K=5120, N=248320, M=128 lm_head using the pinned MLIR-AIE GEMM ABI and the Peano compiler path instead of Chess.
-- Added `tools/npu/qwen38_27b_xclbin_validator.py` for non-placeholder XCLBIN parsing plus MLIR lock/BD/runtime-kernel checks and exact 27B manifest checks.
-- The canonical workflow was rewritten to split geometry, Q4NX, layer, lm_head, and final packaging into bounded jobs with retained artifacts.
-- The lm_head job compares the generated kernel metadata against the existing Qwen3.5-9B `lm_head.xclbin` as a runtime-ABI reference only; the 9B binary is never used as a 27B artifact.
-- The package job is wired to execute `flm pull qwen3.8:27b` against the generated local package.
+- Execution commit: `6cb76c9a71a8959e31ecf4a9f56b7414dc541812`.
+- Canonical pull-request execution run: `33625944114`.
+- At the last inspection, geometry had completed successfully and the q4nx, layer, and lm_head jobs were executing. No final artifact is marked PASS yet.
+- An execution-only PR `#3` / branch `ci/qwen3.8-27b-canonical` was created solely to obtain a `pull_request`-triggered canonical run because content-API commits do not themselves trigger a new push workflow. The implementation remains on `feat/qwen3.8-27b`.
 
 ## Artifact gate
 
-No artifact is marked PASS yet. At the time of this update there is **no verified 27B `layer.xclbin`, no verified 27B `lm_head.xclbin`, and no verified 27B `model.q4nx` hash** from the new flow. No hardware execution has been performed.
+No artifact is marked PASS yet. There is currently no verified final 27B `layer.xclbin`, no verified final 27B `lm_head.xclbin`, and no verified final 27B `model.q4nx` hash recorded here. No hardware execution has been performed.
 
-Do not record PASS until the underlying artifact, ABI, dimensions, BD/lock-memory topology, Q4NX metadata/hash, package installation, and `flm pull qwen3.8:27b` validations have actually executed. Final hashes and the successful Actions run number must be appended here after execution.
-
-## Actions execution limitation
-
-The GitHub connector available in this session can update repository contents and inspect/rerun existing Actions jobs, but it does not expose the `workflow_dispatch` write endpoint. Repository-content commits made through the connector did not create a new Actions run in the available run/status APIs. The canonical workflow therefore has been prepared and committed, but the new workflow has not yet executed in this session; this is intentionally recorded as a limitation rather than a false PASS.
+Do not record PASS until the underlying artifact, XCLBIN sections, runtime ABI, dimensions, BD/lock-memory topology, Q4NX metadata/hash, package installation, and `flm pull qwen3.8:27b` validations have actually executed. Final hashes, sizes, successful Actions run number/status, package result, and hardware status must be appended after execution.
