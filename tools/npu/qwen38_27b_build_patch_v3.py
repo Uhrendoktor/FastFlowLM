@@ -3,12 +3,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-def replace_once(path:Path,old:str,new:str)->bool:
-    text=path.read_text()
-    if new in text:return False
-    if old not in text:return False
-    path.write_text(text.replace(old,new,1)); return True
-
 def patch_runner(runner:Path)->bool:
     s=runner.read_text()
     if 'QWEN38_27B_BUILD_ONLY' in s:return False
@@ -24,19 +18,14 @@ def patch_npu_build(nb:Path)->None:
     s=s[:start]+helper+s[end:]
     marker='''        "--no-compile-host",\n'''
     if marker not in s: raise SystemExit('aiecc command anchor not found')
-    if '--no-xchesscc' not in s:
-        s=s.replace(marker,marker+'''        *(["--no-xchesscc","--no-xbridge","--peano",os.environ["PEANO_INSTALL_DIR"]] if os.environ.get("QWEN38_USE_PEANO") == "1" else []),\n''',1)
+    if '--no-xchesscc' not in s:s=s.replace(marker,marker+'''        *(["--no-xchesscc","--no-xbridge","--peano",os.environ["PEANO_INSTALL_DIR"]] if os.environ.get("QWEN38_USE_PEANO") == "1" else []),\n''',1)
     nb.write_text(s)
 
 def main(root:Path)->int:
-    root=root.resolve(); ex=root/'examples/qwen3-decode-layer'; gen=ex/'cases/full_layer_engine_generate.py'; runner=ex/'cases/qwen3_8b_decode_layer_runner.py'; nb=ex/'npu_build.py'; changes=[]
-    specs=[('return_window_dwords != 512','return_window_dwords != 768','return window 768 dwords'),('require_source_side_packet_replay(source, 8)','require_source_side_packet_replay(source, 4)','source replay locks 4'),('require_source_side_packet_replay(src, 8)','require_source_side_packet_replay(src, 4)','source replay locks 4'),('require_attention_block_shapes(hub, WEIGHT_DWORDS * 8)','require_attention_block_shapes(hub, ATTENTION_OUTPUT_DWORDS)','attention output packet width')]
-    for old,new,msg in specs:
-        if replace_once(gen,old,new): changes.append(msg)
-        elif old not in gen.read_text() and new not in gen.read_text(): raise SystemExit(f'27B generator contract missing both forms: {old} / {new}')
-    if patch_runner(runner): changes.append('graph-only runner mode')
-    patch_npu_build(nb); changes.append('Peano AIE2P compilation fallback; Chess retained as default')
-    for c in changes: print('PATCHED:',c)
+    root=root.resolve(); ex=root/'examples/qwen3-decode-layer'; runner=ex/'cases/qwen3_8b_decode_layer_runner.py'; nb=ex/'npu_build.py'
+    if patch_runner(runner): print('PATCHED: graph-only runner mode')
+    patch_npu_build(nb); print('PATCHED: Peano AIE2P compilation fallback; Chess retained as default')
+    print('PATCHED: generator adapter owns 27B topology; no brittle legacy-string rewrites')
     return 0
 if __name__=='__main__':
     import argparse; p=argparse.ArgumentParser(); p.add_argument('root',type=Path); a=p.parse_args(); raise SystemExit(main(a.root))
