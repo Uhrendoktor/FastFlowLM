@@ -1,31 +1,28 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import argparse, hashlib, os, shutil, subprocess, sys, urllib.request
+import argparse, hashlib, importlib.metadata, os, shutil, subprocess, sys, urllib.request
 from pathlib import Path
-
 K=5120; N=248320; M=128
-PEANO_WHEEL_URL = "https://github.com/Xilinx/llvm-aie/releases/download/nightly/llvm_aie-21.0.0.2026061701%2B742b6c9b-py3-none-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
-PEANO_WHEEL_SHA256 = "01da9bf7fd6d6fc86a77f85c5841fc3d74508eae118f6c0e5007ae48bacc748a"
+PEANO_WHEEL_URL="https://github.com/Xilinx/llvm-aie/releases/download/nightly/llvm_aie-21.0.0.2026061701%2B742b6c9b-py3-none-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
+PEANO_WHEEL_SHA256="01da9bf7fd6d6fc86a77f85c5841fc3d74508eae118f6c0e5007ae48bacc748a"
 
-def ensure_peano(root: Path) -> Path:
+def ensure_peano(root:Path)->Path:
     configured=os.environ.get('PEANO_INSTALL_DIR')
-    if configured and (Path(configured)/'bin'/'clang++').is_file():
-        return Path(configured)
+    if configured and (Path(configured)/'bin'/'clang++').is_file(): return Path(configured)
     cache=Path.home()/'.cache'/'qwen38-peano'; cache.mkdir(parents=True,exist_ok=True)
     wheel=cache/Path(PEANO_WHEEL_URL.split('/')[-1]).name.replace('%2B','+')
     if not wheel.is_file() or hashlib.sha256(wheel.read_bytes()).hexdigest()!=PEANO_WHEEL_SHA256:
-        urllib.request.urlretrieve(PEANO_WHEEL_URL,wheel)
-        got=hashlib.sha256(wheel.read_bytes()).hexdigest()
+        urllib.request.urlretrieve(PEANO_WHEEL_URL,wheel); got=hashlib.sha256(wheel.read_bytes()).hexdigest()
         if got!=PEANO_WHEEL_SHA256: raise SystemExit(f'Peano wheel SHA256 mismatch: {got}')
-    subprocess.run([sys.executable,'-m','pip','install','--no-deps',str(wheel)],check=True)
-    show=subprocess.check_output([sys.executable,'-m','pip','show','llvm-aie'],text=True)
-    location=next((x.split(':',1)[1].strip() for x in show.splitlines() if x.startswith('Location:')),None)
-    if not location: raise SystemExit('llvm-aie installed but location is unknown')
-    pd=Path(location)/'llvm-aie'
-    if not (pd/'bin'/'clang++').is_file(): raise SystemExit(f'Peano clang++ missing: {pd}')
+    uv=shutil.which('uv') or str(Path.home()/'.local/bin/uv')
+    subprocess.run([uv,'pip','install','--python',sys.executable,'--no-deps',str(wheel)],check=True)
+    dist=importlib.metadata.distribution('llvm-aie'); pd=Path(dist.locate_file('llvm-aie'))
+    if not (pd/'bin'/'clang++').is_file():
+        candidates=list(Path(dist.locate_file('')).rglob('clang++')); pd=candidates[0].parent.parent if candidates else pd
+    if not (pd/'bin'/'clang++').is_file(): raise SystemExit(f'Peano clang++ missing after install: {pd}')
     os.environ['PEANO_INSTALL_DIR']=str(pd); return pd
 
-def patch(p:Path, pd:Path)->None:
+def patch(p:Path,pd:Path)->None:
     s=p.read_text().replace('use_chess?=1','use_chess?=0')
     s=s.replace('ifneq (${use_chess}, 1)\n$(error gemm_asymmetric_tile_buffering in torch2aie is Chess-only; use use_chess=1)\nendif\n','')
     s=s.replace('KERNEL_CC=xchesscc_wrapper\nKERNEL_CFLAGS=aie2p -I ${AIETOOLS_DIR}/include -I ${MLIR_AIE_DIR}/include',f'KERNEL_CC={pd}/bin/clang++\nKERNEL_CFLAGS=-O2 -std=c++20 --target=aie2p-none-unknown-elf -DNDEBUG -Wno-parentheses -Wno-attributes -Wno-macro-redefined -I ${{AIETOOLS_DIR}}/include -I ${{MLIR_AIE_DIR}}/include')
@@ -41,7 +38,7 @@ def main(root:Path)->int:
     if not xs: raise SystemExit('no lm_head xclbin')
     x=xs[0]; m=ms[0] if ms else None
     if m:
-        t=m.read_text()
+        t=m.read_text();
         if str(K) not in t or str(N) not in t: raise SystemExit('MLIR does not contain K=5120 and N=248320')
         if 'MLIR_AIE' not in t: raise SystemExit('MLIR missing MLIR_AIE kernel')
     out=Path(os.environ.get('QWEN38_LM_HEAD_OUT',root/'lm_head.xclbin')); out.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(x,out)
