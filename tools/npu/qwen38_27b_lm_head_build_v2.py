@@ -9,10 +9,11 @@ def configure_peano_makefile(cfg:Path,peano:Path)->None:
     s=s.replace('use_chess?=1','use_chess?=0')
     s=s.replace('ifneq (${use_chess}, 1)\n$(error gemm_asymmetric_tile_buffering in torch2aie is Chess-only; use use_chess=1)\nendif\n','')
     start='KERNEL_CC=xchesscc_wrapper\nKERNEL_CFLAGS=aie2p -I ${AIETOOLS_DIR}/include -I ${MLIR_AIE_DIR}/include'
-    repl=f'KERNEL_CC={peano}/bin/clang++\nKERNEL_CFLAGS=-arch=aie2p -O2 -std=c++20 -DNDEBUG -Wno-parentheses -Wno-attributes -Wno-macro-redefined -I ${{AIETOOLS_DIR}}/include -I ${{MLIR_AIE_DIR}}/include'
+    repl=f'KERNEL_CC={peano}/bin/clang++\nKERNEL_CFLAGS=--target=aie2p-none-unknown-elf -O2 -std=c++20 -DNDEBUG -Wno-parentheses -Wno-attributes -Wno-macro-redefined -I ${{AIETOOLS_DIR}}/include -I ${{MLIR_AIE_DIR}}/include'
     if start not in s: raise SystemExit('gemm makefile kernel compiler anchor missing')
     s=s.replace(start,repl,1).replace('aiecc_chess_flags=--unified',f'aiecc_chess_flags=--no-xchesscc --no-xbridge --peano {peano}',1)
     p.write_text(s)
+    m=cfg/'Makefile'; ms=m.read_text().replace('kernelsrc := mm_bfp_mixed.cc','kernelsrc := mm_bf16.cc'); m.write_text(ms)
 
 def main(root:Path)->int:
     root=root.resolve(); ex=root/'examples/gemm_asymmetric_tile_buffering'; cfg=ex/'config1'
@@ -34,7 +35,7 @@ def main(root:Path)->int:
         if 'MLIR_AIE' not in t: raise SystemExit('MLIR missing MLIR_AIE kernel')
     out=Path(os.environ.get('QWEN38_LM_HEAD_OUT',root/'lm_head.xclbin')); out.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(x,out)
     if m: shutil.copy2(m,out.with_suffix('.mlir'))
-    out.with_suffix('.manifest.json').write_text('{"M":128,"K":5120,"N":248320,"kernel":"MLIR_AIE","input_dtype":"bf16","weight_dtype":"bf16","output_dtype":"bf16","abi_source":"torch2aie/examples/gemm_asymmetric_tile_buffering/config1/n1_core_bf16.py","targetname":"n1_core","compiler":"pinned-toolchain-peano"}\n')
+    out.with_suffix('.manifest.json').write_text('{"M":128,"K":5120,"N":248320,"kernel":"MLIR_AIE","input_dtype":"bf16","weight_dtype":"bf16","output_dtype":"bf16","abi_source":"torch2aie/examples/gemm_asymmetric_tile_buffering/config1/n1_core_bf16.py + mm_bf16.cc","targetname":"n1_core","compiler":"pinned-toolchain-peano"}\n')
     print(out); return 0
 if __name__=='__main__':
     ap=argparse.ArgumentParser(); ap.add_argument('root',type=Path); a=ap.parse_args(); raise SystemExit(main(a.root))
