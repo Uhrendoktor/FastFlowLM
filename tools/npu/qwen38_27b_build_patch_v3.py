@@ -41,17 +41,20 @@ def patch_npu_build(nb: Path) -> None:
 def patch_27b_validation(ex: Path) -> None:
     g = ex / 'cases/full_layer_engine_generate.py'
     s = g.read_text()
-    # The adapter already changes the fixed attention constants. The remaining stale
-    # expression is the call-site argument: it used the old 8-head weight-carrier
-    # product instead of the geometry-derived 27B attention return size.
-    if 'WEIGHT_DWORDS * 8,' in s:
-        s = s.replace('WEIGHT_DWORDS * 8,', 'OUTPUT_DWORDS,', 1)
-    elif 'OUTPUT_DWORDS,' not in s:
-        raise SystemExit('27B attention output-dword call-site anchor not found')
-    # Keep this helper idempotent when the first-stage adapter has already applied the
-    # four-window hub and 27B output constants.
-    s = s.replace('if return_window_dwords != 384:', 'if return_window_dwords != OUTPUT_DWORDS:')
-    s = s.replace('attention return window must be 384 dwords', 'attention return window must match OUTPUT_DWORDS')
+    # The adapter changes the 8-window historical replay contract to the 4-window
+    # Qwen3.8 attention fabric. These strings are call-site expectations, not graph
+    # constants, so patch them after the first-stage adapter.
+    stale = (
+        '"aie.use_lock(%hub_return_full, AcquireGreaterEqual, 8)",  # C2: = HUB_WINDOWS (8-col); was stale 4',
+        '"aie.use_lock(%hub_return_empty, Release, 8)",',
+    )
+    if all(item in s for item in stale):
+        s = s.replace(stale[0], '"aie.use_lock(%hub_return_full, AcquireGreaterEqual, 4)",', 1)
+        s = s.replace(stale[1], '"aie.use_lock(%hub_return_empty, Release, 4)",', 1)
+    elif '"aie.use_lock(%hub_return_full, AcquireGreaterEqual, 4)",' not in s:
+        raise SystemExit('27B replay lock call-site anchors not found')
+    # Keep the attention-shape call's carrier/weight split untouched; only its final
+    # argument is the output packet size and is already geometry-derived by the adapter.
     g.write_text(s)
 
 
@@ -65,7 +68,7 @@ def main(root: Path) -> int:
     patch_npu_build(nb)
     patch_27b_validation(ex)
     print('PATCHED: Peano --target fallback; Chess retained as default')
-    print('PATCHED: 27B four-window attention lock/BD validation')
+    print('PATCHED: 27B four-window attention replay locks')
     print('PATCHED: generator adapter owns 27B topology')
     return 0
 
