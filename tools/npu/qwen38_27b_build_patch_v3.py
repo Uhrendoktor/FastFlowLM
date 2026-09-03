@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 import os
+import re
 from pathlib import Path
 
 
@@ -41,20 +42,22 @@ def patch_npu_build(nb: Path) -> None:
 def patch_27b_validation(ex: Path) -> None:
     g = ex / 'cases/full_layer_engine_generate.py'
     s = g.read_text()
-    # The adapter changes the 8-window historical replay contract to the 4-window
-    # Qwen3.8 attention fabric. These strings are call-site expectations, not graph
-    # constants, so patch them after the first-stage adapter.
-    stale = (
-        '"aie.use_lock(%hub_return_full, AcquireGreaterEqual, 8)",  # C2: = HUB_WINDOWS (8-col); was stale 4',
-        '"aie.use_lock(%hub_return_empty, Release, 8)",',
+    # Patch the exact replay call arguments with regex so comments/whitespace in
+    # the pinned historical generator cannot prevent the 4-window conversion.
+    s, n1 = re.subn(
+        r'("aie\.use_lock\(%hub_return_full,\s*AcquireGreaterEqual,\s*)8(\)"(?:,\s*#.*)?)',
+        r'\g<1>4\g<2>', s, count=1,
     )
-    if all(item in s for item in stale):
-        s = s.replace(stale[0], '"aie.use_lock(%hub_return_full, AcquireGreaterEqual, 4)",', 1)
-        s = s.replace(stale[1], '"aie.use_lock(%hub_return_empty, Release, 4)",', 1)
-    elif '"aie.use_lock(%hub_return_full, AcquireGreaterEqual, 4)",' not in s:
-        raise SystemExit('27B replay lock call-site anchors not found')
-    # Keep the attention-shape call's carrier/weight split untouched; only its final
-    # argument is the output packet size and is already geometry-derived by the adapter.
+    s, n2 = re.subn(
+        r'("aie\.use_lock\(%hub_return_empty,\s*Release,\s*)8(\)")',
+        r'\g<1>4\g<2>', s, count=1,
+    )
+    if n1 + n2 == 0:
+        if 'AcquireGreaterEqual, 4' not in s or 'Release, 4' not in s:
+            raise SystemExit('27B replay lock call-site anchors not found')
+    # Ensure the attention shape call receives the geometry-derived output packet,
+    # not the historical 8-head weight-carrier product.
+    s = s.replace('WEIGHT_DWORDS * 8,', 'OUTPUT_DWORDS,', 1)
     g.write_text(s)
 
 
@@ -69,7 +72,7 @@ def main(root: Path) -> int:
     patch_27b_validation(ex)
     print('PATCHED: Peano --target fallback; Chess retained as default')
     print('PATCHED: 27B four-window attention replay locks')
-    print('PATCHED: generator adapter owns 27B topology')
+    print('PATCHED: 27B output packet geometry')
     return 0
 
 
