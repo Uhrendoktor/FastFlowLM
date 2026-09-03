@@ -25,7 +25,7 @@ def patch_npu_build(nb: Path) -> None:
     end = s.find('\ndef _linked_role_objects', start)
     if start < 0 or end < 0:
         raise SystemExit('cannot locate _compile_aie_object')
-    helper = '''def _compile_aie_object(source_names: tuple[str, ...], object_name: str) -> None:\n    if not source_names:\n        raise ValueError(f"missing source for role object: {object_name}")\n    src = EXPERIMENT_DIR / source_names[0]\n    obj = _role_object_path(object_name)\n    obj.parent.mkdir(parents=True, exist_ok=True)\n    if os.environ.get("QWEN38_USE_PEANO") != "1":\n        compiler = TOOLCHAIN_DIR / "bin" / "xchesscc_wrapper"\n        cmd = [str(compiler), "aie2p", f"-I{EXPERIMENT_DIR}", f"-I{AIETOOLS_DIR/'include'}", f"-I{MLIR_AIE_DIR/'include'}", f"-I{MLIR_AIE_DIR/'include/aie_kernels'}", f"-I{MLIR_AIE_DIR/'include/aie_kernels/aie2p'}", "-c", str(src), "-o", str(obj)]\n    else:\n        compiler = Path(os.environ["PEANO_INSTALL_DIR"]) / "bin" / "clang++"\n        cmd = [str(compiler), "-arch", "aie2p", "-O2", "-std=c++20", "-DNDEBUG", "-Wno-parentheses", "-Wno-attributes", "-Wno-macro-redefined", f"-I{EXPERIMENT_DIR}", f"-I{AIETOOLS_DIR/'include'}", f"-I{MLIR_AIE_DIR/'include'}", f"-I{MLIR_AIE_DIR/'include/aie_kernels'}", f"-I{MLIR_AIE_DIR/'include/aie_kernels/aie2p'}", "-c", str(src), "-o", str(obj)]\n    print(f"  Compiling {object_name} with {compiler} from {src.name}...")\n    run_command(cmd)\n'''
+    helper = '''def _compile_aie_object(source_names: tuple[str, ...], object_name: str) -> None:\n    if not source_names:\n        raise ValueError(f"missing source for role object: {object_name}")\n    src = EXPERIMENT_DIR / source_names[0]\n    obj = _role_object_path(object_name)\n    obj.parent.mkdir(parents=True, exist_ok=True)\n    if os.environ.get("QWEN38_USE_PEANO") != "1":\n        compiler = TOOLCHAIN_DIR / "bin" / "xchesscc_wrapper"\n        cmd = [str(compiler), "aie2p", f"-I{EXPERIMENT_DIR}", f"-I{AIETOOLS_DIR/'include'}", f"-I{MLIR_AIE_DIR/'include'}", f"-I{MLIR_AIE_DIR/'include/aie_kernels'}", f"-I{MLIR_AIE_DIR/'include/aie_kernels/aie2p'}", "-c", str(src), "-o", str(obj)]\n    else:\n        compiler = Path(os.environ["PEANO_INSTALL_DIR"]) / "bin" / "clang++"\n        cmd = [str(compiler), "-Xclang", "-triple", "-Xclang", "aie2p-none-unknown-elf", "-O2", "-std=c++20", "-DNDEBUG", "-Wno-parentheses", "-Wno-attributes", "-Wno-macro-redefined", f"-I{EXPERIMENT_DIR}", f"-I{AIETOOLS_DIR/'include'}", f"-I{MLIR_AIE_DIR/'include'}", f"-I{MLIR_AIE_DIR/'include/aie_kernels'}", f"-I{MLIR_AIE_DIR/'include/aie_kernels/aie2p'}", "-c", str(src), "-o", str(obj)]\n    print(f"  Compiling {object_name} with {compiler} from {src.name}...")\n    run_command(cmd)\n'''
     s = s[:start] + helper + s[end:]
     marker = '''        "--no-compile-host",\n'''
     if marker not in s:
@@ -68,7 +68,7 @@ def main(root: Path) -> int:
         print('PATCHED: graph-only runner mode')
     patch_npu_build(nb)
     patch_27b_validation(ex)
-    print('PATCHED: Peano -arch aie2p fallback; Chess retained as default')
+    print('PATCHED: Peano cc1 -triple fallback; Chess retained as default')
     print('PATCHED: 27B four-window attention replay locks')
     print('PATCHED: 27B attention output packet geometry')
     return 0
