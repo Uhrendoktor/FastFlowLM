@@ -12,12 +12,12 @@ AIE_COLS = 4
 def configure_peano_makefile(cfg: Path, peano: Path) -> None:
     p = cfg.parent / 'makefile_common'
     s = p.read_text()
-    s = s.replace('use_chess?=1', 'use_chess?=0')
-    s = re.sub(r'-triple\s+aie2p-none-unknown-elf', '--target=aie2p-none-unknown-elf', s)
-    # Keep the pinned compiler selected even if the historical makefile uses :=/+= syntax.
+    s = re.sub(r'(?ms)^ifneq\s*\(\$\{use_chess\},\s*1\)\s*\n\$\(error gemm_asymmetric_tile_buffering.*?\nendif\s*\n', '', s)
+    s = re.sub(r'-triple\s+aie2p-none-unknown-elf', '-arch aie2p', s)
+    s = re.sub(r'--target=aie2p-none-unknown-elf', '-arch aie2p', s)
     s = re.sub(r'^KERNEL_CC\s*[:?+]?=\s*.*$', f'KERNEL_CC={peano}/bin/clang++', s, flags=re.MULTILINE)
     s = re.sub(r'^KERNEL_CFLAGS\s*[:?+]?=\s*.*$',
-               'KERNEL_CFLAGS=--target=aie2p-none-unknown-elf -O2 -std=c++20 -DNDEBUG '
+               'KERNEL_CFLAGS=-arch aie2p -O2 -std=c++20 -DNDEBUG '
                '-Wno-parentheses -Wno-attributes -Wno-macro-redefined '
                '-I ${AIETOOLS_DIR}/include -I ${MLIR_AIE_DIR}/include',
                s, flags=re.MULTILINE)
@@ -30,13 +30,6 @@ def configure_peano_makefile(cfg: Path, peano: Path) -> None:
 
 
 def configure_lm_head_design(cfg: Path) -> None:
-    """Adapt the pinned 8-column design to the exact 27B vocab geometry.
-
-    N/128 = 1940 output tiles. 1940 is not divisible by 8, but is exactly
-    divisible by 4, giving 485 complete groups per AIE column. The B tensor
-    tiling must change with the column count; otherwise the last vocabulary
-    tiles are omitted or the taps alias the weight matrix.
-    """
     src = cfg / 'n1_core_bf16.py'
     text = src.read_text()
     if 'n_aie_cols = 8' not in text:
