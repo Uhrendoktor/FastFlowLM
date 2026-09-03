@@ -41,25 +41,15 @@ def patch_npu_build(nb: Path) -> None:
 def patch_27b_validation(ex: Path) -> None:
     g = ex / 'cases/full_layer_engine_generate.py'
     s = g.read_text()
-    # qwen38_27b_torch2aie_adapter.py runs first and may already have applied these edits.
-    # Make this second-stage patch idempotent so the canonical workflow does not fail merely
-    # because the adapter and this helper agree on the 27B contract.
-    if 'HUB_Q_OUT_CHANNELS != (1, 2, 3, 4)' in s and 'HUB_RETURN_IN_CHANNELS != (2, 3, 4, 5)' in s:
-        g.write_text(s.replace('if return_window_dwords != 384:', 'if return_window_dwords != OUTPUT_DWORDS:'))
-        return
-
-    replacements = {
-        '"aie.use_lock(%hub_return_full, AcquireGreaterEqual, 8)",  # C2: = HUB_WINDOWS (8-col); was stale 4': '"aie.use_lock(%hub_return_full, AcquireGreaterEqual, 4)",',
-        '"aie.use_lock(%hub_return_empty, Release, 8)",': '"aie.use_lock(%hub_return_empty, Release, 4)",',
-        'or HUB_Q_OUT_CHANNELS != (1, 2, 3, 4, 1, 2, 3, 4)': 'or HUB_Q_OUT_CHANNELS != (1, 2, 3, 4)',
-        'or HUB_Q_OUT_BDS != (25, 2, 26, 3, 37, 5, 36, 8)  # 8-col; C1 remapped idx4/6 to 37/36 (avoid attn_out 34-35)': 'or HUB_Q_OUT_BDS != (25, 2, 26, 3)',
-        'or HUB_RETURN_IN_CHANNELS != (2, 3, 4, 5, 2, 3, 4, 5)': 'or HUB_RETURN_IN_CHANNELS != (2, 3, 4, 5)',
-        'or HUB_RETURN_IN_BDS != (4, 28, 6, 30, 9, 38, 11, 39)  # 8-col; C1 remapped idx5/7 to 38/39 (avoid attn_out 34-35)': 'or HUB_RETURN_IN_BDS != (4, 28, 6, 30)',
-        'or HUB_DOWN_OUT_BDS != (27, 29, 31, 32, 33, 42, 43, 44)': 'or HUB_DOWN_OUT_BDS != (44, 45, 46, 47, 48, 49, 50, 51, 52, 53)',
-    }
-    for old, new in replacements.items():
-        if old in s:
-            s = s.replace(old, new, 1)
+    # The adapter already changes the fixed attention constants. The remaining stale
+    # expression is the call-site argument: it used the old 8-head weight-carrier
+    # product instead of the geometry-derived 27B attention return size.
+    if 'WEIGHT_DWORDS * 8,' in s:
+        s = s.replace('WEIGHT_DWORDS * 8,', 'OUTPUT_DWORDS,', 1)
+    elif 'OUTPUT_DWORDS,' not in s:
+        raise SystemExit('27B attention output-dword call-site anchor not found')
+    # Keep this helper idempotent when the first-stage adapter has already applied the
+    # four-window hub and 27B output constants.
     s = s.replace('if return_window_dwords != 384:', 'if return_window_dwords != OUTPUT_DWORDS:')
     s = s.replace('attention return window must be 384 dwords', 'attention return window must match OUTPUT_DWORDS')
     g.write_text(s)
