@@ -42,8 +42,8 @@ def patch_npu_build(nb: Path) -> None:
 def patch_27b_validation(ex: Path) -> None:
     g = ex / 'cases/full_layer_engine_generate.py'
     s = g.read_text()
-    # Patch the exact replay call arguments with regex so comments/whitespace in
-    # the pinned historical generator cannot prevent the 4-window conversion.
+    # Four attention windows are the 27B geometry. Patch both replay lock call-site
+    # expectations even when the first-stage adapter left its historical comments.
     s, n1 = re.subn(
         r'("aie\.use_lock\(%hub_return_full,\s*AcquireGreaterEqual,\s*)8(\)"(?:,\s*#.*)?)',
         r'\g<1>4\g<2>', s, count=1,
@@ -52,12 +52,14 @@ def patch_27b_validation(ex: Path) -> None:
         r'("aie\.use_lock\(%hub_return_empty,\s*Release,\s*)8(\)")',
         r'\g<1>4\g<2>', s, count=1,
     )
-    if n1 + n2 == 0:
-        if 'AcquireGreaterEqual, 4' not in s or 'Release, 4' not in s:
-            raise SystemExit('27B replay lock call-site anchors not found')
-    # Ensure the attention shape call receives the geometry-derived output packet,
-    # not the historical 8-head weight-carrier product.
-    s = s.replace('WEIGHT_DWORDS * 8,', 'OUTPUT_DWORDS,', 1)
+    if n1 + n2 == 0 and 'AcquireGreaterEqual, 4' not in s:
+        raise SystemExit('27B replay lock call-site anchors not found')
+    # The final parameter is attention output packet size. It is NOT the layer's
+    # hidden output (5120/2=2560) and must not use the old 8-head weight product.
+    if 'WEIGHT_DWORDS * 8,' in s:
+        s = s.replace('WEIGHT_DWORDS * 8,', 'ATTENTION_OUTPUT_DWORDS,', 1)
+    elif 'ATTENTION_OUTPUT_DWORDS,' not in s:
+        raise SystemExit('27B attention output-dword call-site anchor not found')
     g.write_text(s)
 
 
@@ -72,7 +74,7 @@ def main(root: Path) -> int:
     patch_27b_validation(ex)
     print('PATCHED: Peano --target fallback; Chess retained as default')
     print('PATCHED: 27B four-window attention replay locks')
-    print('PATCHED: 27B output packet geometry')
+    print('PATCHED: 27B attention output packet geometry')
     return 0
 
 
