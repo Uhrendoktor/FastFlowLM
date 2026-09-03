@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import argparse, os, shutil, subprocess
+import argparse, os, re, shutil, subprocess
 from pathlib import Path
 
 K = 5120
@@ -13,24 +13,17 @@ def configure_peano_makefile(cfg: Path, peano: Path) -> None:
     p = cfg.parent / 'makefile_common'
     s = p.read_text()
     s = s.replace('use_chess?=1', 'use_chess?=0')
-    s = s.replace(
-        'ifneq (${use_chess}, 1)\n$(error gemm_asymmetric_tile_buffering in torch2aie is Chess-only; use use_chess=1)\nendif\n',
-        '',
-    )
-    start = 'KERNEL_CC=xchesscc_wrapper\nKERNEL_CFLAGS=aie2p -I ${AIETOOLS_DIR}/include -I ${MLIR_AIE_DIR}/include'
-    repl = (
-        f'KERNEL_CC={peano}/bin/clang++\n'
-        'KERNEL_CFLAGS=-triple aie2p-none-unknown-elf -O2 -std=c++20 -DNDEBUG '
-        '-Wno-parentheses -Wno-attributes -Wno-macro-redefined '
-        '-I ${AIETOOLS_DIR}/include -I ${MLIR_AIE_DIR}/include'
-    )
-    if start not in s:
-        raise SystemExit('gemm makefile kernel compiler anchor missing')
-    s = s.replace(start, repl, 1).replace(
-        'aiecc_chess_flags=--unified',
-        f'aiecc_chess_flags=--no-xchesscc --no-xbridge --peano {peano}',
-        1,
-    )
+    s = re.sub(r'-triple\s+aie2p-none-unknown-elf', '--target=aie2p-none-unknown-elf', s)
+    # Keep the pinned compiler selected even if the historical makefile uses :=/+= syntax.
+    s = re.sub(r'^KERNEL_CC\s*[:?+]?=\s*.*$', f'KERNEL_CC={peano}/bin/clang++', s, flags=re.MULTILINE)
+    s = re.sub(r'^KERNEL_CFLAGS\s*[:?+]?=\s*.*$',
+               'KERNEL_CFLAGS=--target=aie2p-none-unknown-elf -O2 -std=c++20 -DNDEBUG '
+               '-Wno-parentheses -Wno-attributes -Wno-macro-redefined '
+               '-I ${AIETOOLS_DIR}/include -I ${MLIR_AIE_DIR}/include',
+               s, flags=re.MULTILINE)
+    if '--no-xchesscc' not in s:
+        s = s.replace('aiecc_chess_flags=--unified',
+                      f'aiecc_chess_flags=--no-xchesscc --no-xbridge --peano {peano}', 1)
     p.write_text(s)
     m = cfg / 'Makefile'
     m.write_text(m.read_text().replace('kernelsrc := mm_bfp_mixed.cc', 'kernelsrc := mm_bf16.cc'))
@@ -83,10 +76,8 @@ def main(root: Path) -> int:
         'QWEN38_LM_HEAD_AIE_COLS': str(AIE_COLS),
     })
     subprocess.run(
-        [
-            'make', f'M={M}', f'K={K}', f'N={N}',
-            'targetname=n1_core', 'aie_py_src=n1_core_bf16.py', 'use_chess=0',
-        ],
+        ['make', f'M={M}', f'K={K}', f'N={N}',
+         'targetname=n1_core', 'aie_py_src=n1_core_bf16.py', 'use_chess=0'],
         cwd=cfg,
         check=True,
         env=env,
@@ -112,16 +103,12 @@ def main(root: Path) -> int:
 
     import json
     manifest = {
-        'M': M,
-        'K': K,
-        'N': N,
+        'M': M, 'K': K, 'N': N,
         'output_tiles': N // 128,
         'aie_cols': AIE_COLS,
         'groups_per_column': (N // 128) // AIE_COLS,
         'kernel': 'MLIR_AIE',
-        'input_dtype': 'bf16',
-        'weight_dtype': 'bf16',
-        'output_dtype': 'bf16',
+        'input_dtype': 'bf16', 'weight_dtype': 'bf16', 'output_dtype': 'bf16',
         'abi_source': 'torch2aie/examples/gemm_asymmetric_tile_buffering/config1/n1_core_bf16.py + mm_bf16.cc',
         'targetname': 'n1_core',
         'compiler': 'pinned-toolchain-peano',
